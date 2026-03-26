@@ -11,13 +11,13 @@ Copy and paste one line — downloads, installs, and launches automatically:
 **macOS / Linux:**
 
 ```
-curl -fsSL https://raw.githubusercontent.com/kstost/cokacctl/refs/heads/main/manage.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kstost/cokacctl/refs/heads/main/manage.sh | bash && cokacctl
 ```
 
 **Windows (PowerShell):**
 
 ```
-irm https://raw.githubusercontent.com/kstost/cokacctl/refs/heads/main/manage.ps1 | iex
+irm https://raw.githubusercontent.com/kstost/cokacctl/refs/heads/main/manage.ps1 | iex; cokacctl
 ```
 
 ## Usage

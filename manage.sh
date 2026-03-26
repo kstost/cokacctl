@@ -187,8 +187,7 @@ main() {
 
         success "Installed!"
 
-        # Run cokacctl with tty stdin (curl pipe replaces stdin)
-        exec "$install_path" "$@" </dev/tty
+        success "Run 'cokacctl' to start."
     else
         error "Installation failed"
     fi
