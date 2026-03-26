@@ -1,4 +1,5 @@
 use super::{ServiceManager, ServiceStatus};
+use crate::core::debug::decode_output;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -69,8 +70,8 @@ impl ServiceManager for TaskSchedulerManager {
         let output = Self::powershell(&script)?;
         let elapsed = t0.elapsed();
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = decode_output(&output.stdout);
+        let stderr = decode_output(&output.stderr);
         dlog!("taskscheduler", "Register took: {:?}", elapsed);
         dlog!("taskscheduler", "Register exit code: {}", output.status);
         dlog!("taskscheduler", "Register stdout: '{}'", stdout.trim());
@@ -90,8 +91,8 @@ impl ServiceManager for TaskSchedulerManager {
         let start_output = Self::powershell(&start_script)?;
         let start_elapsed = t1.elapsed();
 
-        let start_stdout = String::from_utf8_lossy(&start_output.stdout);
-        let start_stderr = String::from_utf8_lossy(&start_output.stderr);
+        let start_stdout = decode_output(&start_output.stdout);
+        let start_stderr = decode_output(&start_output.stderr);
         dlog!("taskscheduler", "Start took: {:?}", start_elapsed);
         dlog!("taskscheduler", "Start exit code: {}", start_output.status);
         dlog!("taskscheduler", "Start stdout: '{}'", start_stdout.trim());
@@ -110,14 +111,24 @@ impl ServiceManager for TaskSchedulerManager {
         dlog!("taskscheduler", "stop() called");
 
         // Stop the scheduled task
-        let _ = Self::powershell(&format!(
+        let stop_result = Self::powershell(&format!(
             "Stop-ScheduledTask -TaskName '{}' -ErrorAction SilentlyContinue", TASK_NAME
         ));
+        if let Ok(ref out) = stop_result {
+            let stderr = decode_output(&out.stderr);
+            dlog!("taskscheduler", "Stop-ScheduledTask exit: {}, stderr: '{}'", out.status, stderr.trim());
+        }
 
         // Also kill any running cokacdir process
-        let _ = Command::new("taskkill")
+        let kill_result = Command::new("taskkill")
             .args(["/IM", "cokacdir.exe", "/F"])
             .output();
+        if let Ok(ref out) = kill_result {
+            let stdout = decode_output(&out.stdout);
+            let stderr = decode_output(&out.stderr);
+            dlog!("taskscheduler", "taskkill exit: {}, stdout: '{}', stderr: '{}'",
+                out.status, stdout.trim(), stderr.trim());
+        }
         dlog!("taskscheduler", "stop() done");
 
         Ok(())
@@ -130,9 +141,15 @@ impl ServiceManager for TaskSchedulerManager {
         let _ = self.stop();
 
         // Delete the scheduled task
-        let _ = Command::new("schtasks")
+        let del_result = Command::new("schtasks")
             .args(["/Delete", "/TN", TASK_NAME, "/F"])
             .output();
+        if let Ok(ref out) = del_result {
+            let stdout = decode_output(&out.stdout);
+            let stderr = decode_output(&out.stderr);
+            dlog!("taskscheduler", "schtasks /Delete exit: {}, stdout: '{}', stderr: '{}'",
+                out.status, stdout.trim(), stderr.trim());
+        }
         dlog!("taskscheduler", "remove() done");
 
         Ok(())
@@ -147,7 +164,7 @@ impl ServiceManager for TaskSchedulerManager {
             .output()
         {
             Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stdout = decode_output(&output.stdout);
                 let line = stdout.trim();
                 dlog!("taskscheduler", "status() tasklist: '{}'", line);
                 if line.contains("cokacdir.exe") {
@@ -166,11 +183,13 @@ impl ServiceManager for TaskSchedulerManager {
             .output()
         {
             Ok(output) => {
+                let stdout = decode_output(&output.stdout);
+                let stderr = decode_output(&output.stderr);
                 if !output.status.success() {
-                    dlog!("taskscheduler", "status(): NotInstalled");
+                    dlog!("taskscheduler", "status(): NotInstalled (stderr: '{}')", stderr.trim());
                     ServiceStatus::NotInstalled
                 } else {
-                    dlog!("taskscheduler", "status(): Stopped");
+                    dlog!("taskscheduler", "status(): Stopped (stdout: '{}')", stdout.trim());
                     ServiceStatus::Stopped
                 }
             }

@@ -268,14 +268,16 @@ fn handle_log_key(app: &mut App, key: KeyEvent) -> bool {
 }
 
 fn action_start(app: &mut App) {
-    dlog!("event::action_start", "Loading config...");
+    if app.service_busy {
+        dlog!("event::action_start", "SKIPPED - service_busy is true");
+        return;
+    }
     let config = Config::load();
     if config.tokens.is_empty() {
         dlog!("event::action_start", "No tokens, entering token input");
         app.enter_token_input();
         return;
     }
-    dlog!("event::action_start", "Finding cokacdir binary...");
     let binary_path = match platform::find_cokacdir() {
         Some(p) => {
             dlog!("event::action_start", "Found: {}", p.display());
@@ -287,41 +289,46 @@ fn action_start(app: &mut App) {
             return;
         }
     };
-    dlog!("event::action_start", "Calling mgr.start() with {} tokens...", config.tokens.len());
-    let mgr = service::manager();
-    match mgr.start(&binary_path, &config.tokens) {
-        Ok(()) => {
-            dlog!("event::action_start", "Service started successfully");
-            app.set_status("Service started", false);
-            app.refresh_status();
-        }
-        Err(e) => {
-            dlog!("event::action_start", "Start failed: {}", e);
-            app.set_status(&format!("Start failed: {}", e), true);
-        }
-    }
+    app.service_busy = true;
+    app.set_status("Starting service...", false);
+    dlog!("event::action_start", "Spawning start thread...");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let tokens = config.tokens.clone();
+    std::thread::spawn(move || {
+        dlog!("event::action_start", "Thread: calling mgr.start()");
+        let mgr = service::manager();
+        let result = mgr.start(&binary_path, &tokens);
+        dlog!("event::action_start", "Thread: result = {:?}", result);
+        tx.send(result).ok();
+    });
+    app.service_action_rx = Some(rx);
 }
 
 
 
 fn action_stop(app: &mut App) {
-    dlog!("event::action_stop", "Stopping service...");
-    let mgr = service::manager();
-    match mgr.stop() {
-        Ok(()) => {
-            dlog!("event::action_stop", "Service stopped");
-            app.set_status("Service stopped", false);
-            app.refresh_status();
-        }
-        Err(e) => {
-            dlog!("event::action_stop", "Stop failed: {}", e);
-            app.set_status(&format!("Stop failed: {}", e), true);
-        }
+    if app.service_busy {
+        dlog!("event::action_stop", "SKIPPED - service_busy");
+        return;
     }
+    app.service_busy = true;
+    app.set_status("Stopping service...", false);
+    dlog!("event::action_stop", "Spawning stop thread...");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mgr = service::manager();
+        let result = mgr.stop();
+        dlog!("event::action_stop", "Thread: result = {:?}", result);
+        tx.send(result).ok();
+    });
+    app.service_action_rx = Some(rx);
 }
 
 fn action_restart(app: &mut App) {
-    dlog!("event::action_restart", "Restarting service...");
+    if app.service_busy {
+        dlog!("event::action_restart", "SKIPPED - service_busy");
+        return;
+    }
     let config = Config::load();
     if config.tokens.is_empty() {
         dlog!("event::action_restart", "No tokens configured");
@@ -336,32 +343,34 @@ fn action_restart(app: &mut App) {
             return;
         }
     };
-    let mgr = service::manager();
-    match mgr.restart(&binary_path, &config.tokens) {
-        Ok(()) => {
-            dlog!("event::action_restart", "Service restarted");
-            app.set_status("Service restarted", false);
-            app.refresh_status();
-        }
-        Err(e) => {
-            dlog!("event::action_restart", "Restart failed: {}", e);
-            app.set_status(&format!("Restart failed: {}", e), true);
-        }
-    }
+    app.service_busy = true;
+    app.set_status("Restarting service...", false);
+    dlog!("event::action_restart", "Spawning restart thread...");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let tokens = config.tokens.clone();
+    std::thread::spawn(move || {
+        let mgr = service::manager();
+        let result = mgr.restart(&binary_path, &tokens);
+        dlog!("event::action_restart", "Thread: result = {:?}", result);
+        tx.send(result).ok();
+    });
+    app.service_action_rx = Some(rx);
 }
 
 fn action_remove(app: &mut App) {
-    dlog!("event::action_remove", "Removing service...");
-    let mgr = service::manager();
-    match mgr.remove() {
-        Ok(()) => {
-            dlog!("event::action_remove", "Service removed");
-            app.set_status("Service removed", false);
-            app.refresh_status();
-        }
-        Err(e) => {
-            dlog!("event::action_remove", "Remove failed: {}", e);
-            app.set_status(&format!("Remove failed: {}", e), true);
-        }
+    if app.service_busy {
+        dlog!("event::action_remove", "SKIPPED - service_busy");
+        return;
     }
+    app.service_busy = true;
+    app.set_status("Removing service...", false);
+    dlog!("event::action_remove", "Spawning remove thread...");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mgr = service::manager();
+        let result = mgr.remove();
+        dlog!("event::action_remove", "Thread: result = {:?}", result);
+        tx.send(result).ok();
+    });
+    app.service_action_rx = Some(rx);
 }

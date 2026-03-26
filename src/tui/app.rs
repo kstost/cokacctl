@@ -41,6 +41,8 @@ pub struct App {
     pub token_input: String,
     pub token_list: Vec<String>,
     pub token_cursor: Option<usize>,
+    pub service_busy: bool,
+    pub service_action_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     // Progress view state
     pub progress_action: Option<ProgressAction>,
     pub progress_lines: Vec<String>,
@@ -93,6 +95,8 @@ impl App {
             progress_lines: Vec::new(),
             progress_rx: None,
             progress_done: None,
+            service_busy: false,
+            service_action_rx: None,
         }
     }
 
@@ -210,5 +214,35 @@ impl App {
             }
         }
         got_any
+    }
+
+    /// Poll service action result from background thread.
+    pub fn poll_service_action(&mut self) {
+        let rx = match &self.service_action_rx {
+            Some(rx) => rx,
+            None => return,
+        };
+        match rx.try_recv() {
+            Ok(Ok(())) => {
+                dlog!("app", "Service action succeeded");
+                self.service_action_rx = None;
+                self.service_busy = false;
+                self.set_status("Service operation completed", false);
+                self.refresh_status();
+            }
+            Ok(Err(e)) => {
+                dlog!("app", "Service action failed: {}", e);
+                self.service_action_rx = None;
+                self.service_busy = false;
+                self.set_status(&format!("Failed: {}", e), true);
+                self.refresh_status();
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                dlog!("app", "Service action channel disconnected");
+                self.service_action_rx = None;
+                self.service_busy = false;
+            }
+        }
     }
 }

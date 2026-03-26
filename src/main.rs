@@ -193,6 +193,7 @@ fn run_tui() {
         }
 
         app.poll_progress();
+        app.poll_service_action();
         app.expire_status();
 
         if app.checking_update {

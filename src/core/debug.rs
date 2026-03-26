@@ -39,6 +39,19 @@ pub fn log(module: &str, msg: &str) {
     }
 }
 
+/// Convert command output bytes to a readable string.
+/// On Windows, system commands output in the OEM code page (e.g. CP949 for Korean).
+/// If UTF-8 decoding fails, fall back to a lossy latin1 decode so the log is still readable.
+pub fn decode_output(bytes: &[u8]) -> String {
+    match String::from_utf8(bytes.to_vec()) {
+        Ok(s) => s,
+        Err(_) => {
+            // Fallback: decode each byte as latin1 (preserves all bytes as chars)
+            bytes.iter().map(|&b| b as char).collect()
+        }
+    }
+}
+
 #[macro_export]
 macro_rules! dlog {
     ($module:expr, $($arg:tt)*) => {
