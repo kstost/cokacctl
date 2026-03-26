@@ -11,6 +11,14 @@ impl TaskSchedulerManager {
         dlog!("taskscheduler", "TaskSchedulerManager created");
         TaskSchedulerManager
     }
+
+    fn powershell(script: &str) -> Result<std::process::Output, String> {
+        dlog!("taskscheduler", "PowerShell: {}", script);
+        Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .output()
+            .map_err(|e| format!("PowerShell execution failed: {}", e))
+    }
 }
 
 impl ServiceManager for TaskSchedulerManager {
@@ -21,35 +29,31 @@ impl ServiceManager for TaskSchedulerManager {
         dlog!("taskscheduler", "Removing existing task...");
         let _ = self.remove();
 
-        // Build the command: "path\to\binary" --ccserver -- token1 token2
         let token_args = tokens.join(" ");
-        let tr = format!(
-            "\"{}\" --ccserver -- {}",
-            binary_path.to_string_lossy(),
-            token_args
-        );
-        dlog!("taskscheduler", "Task command: {}", tr);
+        let args_str = format!("--ccserver -- {}", token_args);
+        let binary = binary_path.to_string_lossy().replace('\'', "''");
+        let args = args_str.replace('\'', "''");
+        let home = dirs::home_dir()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_default()
+            .replace('\'', "''");
 
-        // Create task with schtasks
-        dlog!("taskscheduler", "Creating task with schtasks /Create...");
-        let output = Command::new("schtasks")
-            .args([
-                "/Create",
-                "/TN", TASK_NAME,
-                "/TR", &tr,
-                "/SC", "DAILY",
-                "/ST", "00:00",
-                "/F",
-            ])
-            .output()
-            .map_err(|e| {
-                dlog!("taskscheduler", "schtasks /Create spawn failed: {}", e);
-                format!("Failed to run schtasks: {}", e)
-            })?;
+        let script = format!(
+            "$action = New-ScheduledTaskAction -Execute '{binary}' -Argument '{args}' -WorkingDirectory '{wd}'\n\
+             $trigger = New-ScheduledTaskTrigger -AtLogon\n\
+             Register-ScheduledTask -TaskName '{name}' -Action $action -Trigger $trigger -RunLevel Highest -Force",
+            binary = binary,
+            args = args,
+            wd = home,
+            name = TASK_NAME,
+        );
+
+        dlog!("taskscheduler", "Creating scheduled task via PowerShell...");
+        let output = Self::powershell(&script)?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        dlog!("taskscheduler", "schtasks /Create exit: {}, stdout: '{}', stderr: '{}'",
+        dlog!("taskscheduler", "Register exit: {}, stdout: '{}', stderr: '{}'",
             output.status, stdout.trim(), stderr.trim());
 
         if !output.status.success() {
@@ -57,22 +61,15 @@ impl ServiceManager for TaskSchedulerManager {
         }
 
         // Start the task immediately
-        dlog!("taskscheduler", "Starting task with schtasks /Run...");
-        let run_output = Command::new("schtasks")
-            .args(["/Run", "/TN", TASK_NAME])
-            .output()
-            .map_err(|e| {
-                dlog!("taskscheduler", "schtasks /Run spawn failed: {}", e);
-                format!("Failed to start task: {}", e)
-            })?;
+        dlog!("taskscheduler", "Starting task...");
+        let start_script = format!("Start-ScheduledTask -TaskName '{}'", TASK_NAME);
+        let start_output = Self::powershell(&start_script)?;
 
-        let run_stdout = String::from_utf8_lossy(&run_output.stdout);
-        let run_stderr = String::from_utf8_lossy(&run_output.stderr);
-        dlog!("taskscheduler", "schtasks /Run exit: {}, stdout: '{}', stderr: '{}'",
-            run_output.status, run_stdout.trim(), run_stderr.trim());
+        let start_stderr = String::from_utf8_lossy(&start_output.stderr);
+        dlog!("taskscheduler", "Start exit: {}, stderr: '{}'", start_output.status, start_stderr.trim());
 
-        if !run_output.status.success() {
-            return Err(format!("Task start failed: {}", run_stderr.trim()));
+        if !start_output.status.success() {
+            return Err(format!("Task start failed: {}", start_stderr.trim()));
         }
 
         dlog!("taskscheduler", "start() completed successfully");
@@ -81,63 +78,74 @@ impl ServiceManager for TaskSchedulerManager {
 
     fn stop(&self) -> Result<(), String> {
         dlog!("taskscheduler", "stop() called");
-        let output = Command::new("schtasks")
-            .args(["/End", "/TN", TASK_NAME])
-            .output()
-            .map_err(|e| {
-                dlog!("taskscheduler", "schtasks /End failed: {}", e);
-                format!("Failed to stop task: {}", e)
-            })?;
 
-        dlog!("taskscheduler", "schtasks /End exit: {}", output.status);
-        if !output.status.success() {
-            dlog!("taskscheduler", "stop() task may not have been running");
-        }
+        // Stop the scheduled task
+        let _ = Self::powershell(&format!(
+            "Stop-ScheduledTask -TaskName '{}' -ErrorAction SilentlyContinue", TASK_NAME
+        ));
+
+        // Also kill any running cokacdir process
+        let _ = Command::new("taskkill")
+            .args(["/IM", "cokacdir.exe", "/F"])
+            .output();
+        dlog!("taskscheduler", "stop() done");
+
         Ok(())
     }
 
     fn remove(&self) -> Result<(), String> {
         dlog!("taskscheduler", "remove() called");
-        let output = Command::new("schtasks")
+
+        // Stop first
+        let _ = self.stop();
+
+        // Delete the scheduled task
+        let _ = Command::new("schtasks")
             .args(["/Delete", "/TN", TASK_NAME, "/F"])
             .output();
-        match &output {
-            Ok(o) => dlog!("taskscheduler", "schtasks /Delete exit: {}", o.status),
-            Err(e) => dlog!("taskscheduler", "schtasks /Delete failed: {}", e),
-        }
+        dlog!("taskscheduler", "remove() done");
+
         Ok(())
     }
 
     fn status(&self) -> ServiceStatus {
         dlog!("taskscheduler", "status() called");
+
+        // Check if cokacdir.exe process is actually running
+        match Command::new("tasklist")
+            .args(["/FI", "IMAGENAME eq cokacdir.exe", "/FO", "CSV", "/NH"])
+            .output()
+        {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let line = stdout.trim();
+                dlog!("taskscheduler", "status() tasklist: '{}'", line);
+                if line.contains("cokacdir.exe") {
+                    dlog!("taskscheduler", "status(): Running");
+                    return ServiceStatus::Running;
+                }
+            }
+            Err(e) => {
+                dlog!("taskscheduler", "status() tasklist failed: {}", e);
+            }
+        }
+
+        // Check if the scheduled task exists
         match Command::new("schtasks")
             .args(["/Query", "/TN", TASK_NAME, "/FO", "CSV", "/NH"])
             .output()
         {
             Ok(output) => {
                 if !output.status.success() {
-                    dlog!("taskscheduler", "status(): task not found");
-                    return ServiceStatus::NotInstalled;
-                }
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let line = stdout.trim();
-                dlog!("taskscheduler", "status() raw output: '{}'", line);
-                if line.contains("Running") {
-                    dlog!("taskscheduler", "status(): Running");
-                    ServiceStatus::Running
-                } else if line.contains("Ready") || line.contains("Disabled") {
-                    dlog!("taskscheduler", "status(): Stopped");
-                    ServiceStatus::Stopped
-                } else if line.is_empty() {
-                    dlog!("taskscheduler", "status(): NotInstalled (empty)");
+                    dlog!("taskscheduler", "status(): NotInstalled");
                     ServiceStatus::NotInstalled
                 } else {
-                    dlog!("taskscheduler", "status(): Stopped (unknown: {})", line);
+                    dlog!("taskscheduler", "status(): Stopped");
                     ServiceStatus::Stopped
                 }
             }
             Err(e) => {
-                dlog!("taskscheduler", "status() query failed: {}", e);
+                dlog!("taskscheduler", "status() schtasks failed: {}", e);
                 ServiceStatus::Unknown("Cannot query Task Scheduler".into())
             }
         }
