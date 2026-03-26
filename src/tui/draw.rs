@@ -73,7 +73,7 @@ fn draw_version_panel(f: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::from(vec![
         Span::styled("cokacdir ", Style::default().fg(LABEL)),
         Span::styled(status_icon, ver_style),
-        Span::styled(format!("v{}", version_str), ver_style),
+        Span::styled(if app.cokacdir_version.is_some() { format!("v{}", version_str) } else { version_str.to_string() }, ver_style),
         Span::styled(format!("  {}", path_str), Style::default().fg(DIM)),
     ]));
 
