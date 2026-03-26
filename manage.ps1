@@ -65,8 +65,8 @@ function Main {
         Add-ToPath $installDir
         Success "Installed!"
 
-        # Run cokacctl
-        & $installPath @args
+        # Run cokacctl in a new process (pipe replaces stdin)
+        Start-Process -FilePath $installPath -NoNewWindow -Wait
     } else {
         Error "Installation failed"
     }
