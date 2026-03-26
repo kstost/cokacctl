@@ -464,11 +464,9 @@ fn draw_token_input(f: &mut Frame, app: &App) {
         Span::styled(if input_focused { " ▸ " } else { "   " }, prompt_style),
         Span::styled("Add: ", prompt_style),
     ];
+    input_spans.push(Span::styled(&app.token_input, Style::default().fg(if input_focused { TEXT } else { DIM })));
     if input_focused {
-        input_spans.push(Span::styled(&app.token_input, Style::default().fg(TEXT)));
         input_spans.push(Span::styled("▌", Style::default().fg(CYAN)));
-    } else {
-        input_spans.push(Span::styled("press ↓", Style::default().fg(DIM)));
     }
     lines.push(Line::from(input_spans));
 
@@ -493,7 +491,7 @@ fn mask_token(token: &str) -> String {
     }
     let prefix = &token[..6];
     let suffix = &token[len - 4..];
-    let masked = "·".repeat(std::cmp::min(len - 10, 16));
+    let masked = ".".repeat(std::cmp::min(len - 10, 16));
     format!("{}{}{}", prefix, masked, suffix)
 }
 
