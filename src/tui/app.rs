@@ -42,6 +42,8 @@ pub struct App {
     pub token_list: Vec<String>,
     pub token_cursor: Option<usize>,
     pub service_busy: bool,
+    pub service_busy_label: String,
+    pub service_busy_tick: usize,
     pub service_action_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     // Progress view state
     pub progress_action: Option<ProgressAction>,
@@ -96,6 +98,8 @@ impl App {
             progress_rx: None,
             progress_done: None,
             service_busy: false,
+            service_busy_label: String::new(),
+            service_busy_tick: 0,
             service_action_rx: None,
         }
     }
@@ -237,7 +241,9 @@ impl App {
                 self.set_status(&format!("Failed: {}", e), true);
                 self.refresh_status();
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.service_busy_tick += 1;
+            }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 dlog!("app", "Service action channel disconnected");
                 self.service_action_rx = None;

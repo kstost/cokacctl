@@ -108,11 +108,18 @@ fn draw_version_panel(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_service_panel(f: &mut Frame, app: &App, area: Rect) {
-    let (status_color, status_icon) = match &app.service_status {
-        ServiceStatus::Running => (GREEN, "● Running"),
-        ServiceStatus::Stopped => (RED, "○ Stopped"),
-        ServiceStatus::NotInstalled => (DIM, "○ Not installed"),
-        ServiceStatus::Unknown(_) => (YELLOW, "? Unknown"),
+    let spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+    let (status_color, status_text) = if app.service_busy {
+        let frame = spinner_frames[app.service_busy_tick % spinner_frames.len()];
+        (YELLOW, format!("{} {}...", frame, app.service_busy_label))
+    } else {
+        match &app.service_status {
+            ServiceStatus::Running => (GREEN, "● Running".to_string()),
+            ServiceStatus::Stopped => (RED, "○ Stopped".to_string()),
+            ServiceStatus::NotInstalled => (DIM, "○ Not installed".to_string()),
+            ServiceStatus::Unknown(_) => (YELLOW, "? Unknown".to_string()),
+        }
     };
 
     let os_name = match crate::core::platform::Os::detect() {
@@ -121,18 +128,29 @@ fn draw_service_panel(f: &mut Frame, app: &App, area: Rect) {
         crate::core::platform::Os::Windows => "Task Scheduler",
     };
 
-    // Key hints as bottom title
+    // Key hints - dimmed when busy
+    let hint_style = if app.service_busy {
+        Style::default().fg(Color::Indexed(239))
+    } else {
+        Style::default().fg(DIM)
+    };
+    let key_style = if app.service_busy {
+        Style::default().fg(Color::Indexed(239)).bg(Color::Indexed(236))
+    } else {
+        Style::default().fg(Color::Black).bg(ACCENT)
+    };
+
     let hints = Line::from(vec![
-        Span::styled(" S ", Style::default().fg(Color::Black).bg(ACCENT)),
-        Span::styled("tart ", Style::default().fg(DIM)),
-        Span::styled(" T ", Style::default().fg(Color::Black).bg(ACCENT)),
-        Span::styled("stop ", Style::default().fg(DIM)),
-        Span::styled(" R ", Style::default().fg(Color::Black).bg(ACCENT)),
-        Span::styled("estart ", Style::default().fg(DIM)),
-        Span::styled(" D ", Style::default().fg(Color::Black).bg(ACCENT)),
-        Span::styled("elete ", Style::default().fg(DIM)),
-        Span::styled(" K ", Style::default().fg(Color::Black).bg(ACCENT)),
-        Span::styled("eys ", Style::default().fg(DIM)),
+        Span::styled(" S ", key_style),
+        Span::styled("tart ", hint_style),
+        Span::styled(" T ", key_style),
+        Span::styled("stop ", hint_style),
+        Span::styled(" R ", key_style),
+        Span::styled("estart ", hint_style),
+        Span::styled(" D ", key_style),
+        Span::styled("elete ", hint_style),
+        Span::styled(" K ", key_style),
+        Span::styled("eys ", hint_style),
     ]);
 
     let block = Block::default()
@@ -149,7 +167,7 @@ fn draw_service_panel(f: &mut Frame, app: &App, area: Rect) {
     let mut lines = Vec::new();
     lines.push(Line::from(vec![
         Span::styled("status ", Style::default().fg(LABEL)),
-        Span::styled(status_icon, Style::default().fg(status_color)),
+        Span::styled(&status_text, Style::default().fg(status_color)),
         Span::styled(format!("  via {}", os_name), Style::default().fg(DIM)),
     ]));
 

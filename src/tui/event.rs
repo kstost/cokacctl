@@ -290,7 +290,8 @@ fn action_start(app: &mut App) {
         }
     };
     app.service_busy = true;
-    app.set_status("Starting service...", false);
+    app.service_busy_label = "Starting".to_string();
+    app.service_busy_tick = 0;
     dlog!("event::action_start", "Spawning start thread...");
     let (tx, rx) = std::sync::mpsc::channel();
     let tokens = config.tokens.clone();
@@ -312,7 +313,8 @@ fn action_stop(app: &mut App) {
         return;
     }
     app.service_busy = true;
-    app.set_status("Stopping service...", false);
+    app.service_busy_label = "Stopping".to_string();
+    app.service_busy_tick = 0;
     dlog!("event::action_stop", "Spawning stop thread...");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -344,7 +346,8 @@ fn action_restart(app: &mut App) {
         }
     };
     app.service_busy = true;
-    app.set_status("Restarting service...", false);
+    app.service_busy_label = "Restarting".to_string();
+    app.service_busy_tick = 0;
     dlog!("event::action_restart", "Spawning restart thread...");
     let (tx, rx) = std::sync::mpsc::channel();
     let tokens = config.tokens.clone();
@@ -363,7 +366,8 @@ fn action_remove(app: &mut App) {
         return;
     }
     app.service_busy = true;
-    app.set_status("Removing service...", false);
+    app.service_busy_label = "Removing".to_string();
+    app.service_busy_tick = 0;
     dlog!("event::action_remove", "Spawning remove thread...");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
