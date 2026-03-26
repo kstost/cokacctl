@@ -383,11 +383,10 @@ fn draw_welcome(f: &mut Frame, _app: &App) {
 
 fn draw_token_input(f: &mut Frame, app: &App) {
     let area = f.area();
-
-    let title = format!(" Tokens ({}) ", app.token_list.len());
-
-    // Bottom hints
     let input_focused = app.token_cursor.is_none();
+
+    // Outer border
+    let title = format!(" Tokens ({}) ", app.token_list.len());
     let mut hint_spans = vec![];
     if input_focused {
         hint_spans.push(Span::styled(" Enter ", Style::default().fg(Color::Black).bg(ACCENT)));
@@ -409,50 +408,62 @@ fn draw_token_input(f: &mut Frame, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let mut lines: Vec<Line> = Vec::new();
+    // Split inner area into fixed rows
+    let token_count = app.token_list.len().max(1);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),                          // guide text (2 lines + blank)
+            Constraint::Length(token_count as u16),         // token list
+            Constraint::Length(1),                          // blank
+            Constraint::Length(1),                          // input line
+            Constraint::Min(0),                             // rest (status msg etc)
+        ])
+        .split(inner);
 
     // Guide text
-    lines.push(Line::from(vec![
-        Span::styled("Telegram Bot Token", Style::default().fg(TEXT).add_modifier(Modifier::BOLD)),
-        Span::styled(" — cokacdir runs as a Telegram bot.", Style::default().fg(DIM)),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("Get a token from ", Style::default().fg(DIM)),
-        Span::styled("@BotFather", Style::default().fg(CYAN)),
-        Span::styled(" on Telegram (/newbot).", Style::default().fg(DIM)),
-    ]));
-    lines.push(Line::from(""));
+    let guide = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled("Telegram Bot Token", Style::default().fg(TEXT).add_modifier(Modifier::BOLD)),
+            Span::styled(" - cokacdir runs as a Telegram bot.", Style::default().fg(DIM)),
+        ]),
+        Line::from(vec![
+            Span::styled("Get a token from ", Style::default().fg(DIM)),
+            Span::styled("@BotFather", Style::default().fg(CYAN)),
+            Span::styled(" on Telegram (/newbot).", Style::default().fg(DIM)),
+        ]),
+    ]);
+    f.render_widget(guide, chunks[0]);
 
     // Token list
+    let mut token_lines: Vec<Line> = Vec::new();
     if app.token_list.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "No tokens registered.",
+        token_lines.push(Line::from(Span::styled(
+            "  No tokens registered.",
             Style::default().fg(DIM),
         )));
     } else {
         for (i, token) in app.token_list.iter().enumerate() {
             let is_selected = app.token_cursor == Some(i);
             let display = mask_token(token);
-
             if is_selected {
-                lines.push(Line::from(vec![
-                    Span::styled(" ▸ ", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+                token_lines.push(Line::from(vec![
+                    Span::styled("  > ", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
                     Span::styled(format!("{}. ", i + 1), Style::default().fg(CYAN)),
                     Span::styled(display, Style::default().fg(TEXT)),
                     Span::styled("  ", Style::default()),
                     Span::styled(" Del ", Style::default().fg(Color::White).bg(RED)),
                 ]));
             } else {
-                lines.push(Line::from(vec![
-                    Span::styled("   ", Style::default()),
+                token_lines.push(Line::from(vec![
+                    Span::styled("    ", Style::default()),
                     Span::styled(format!("{}. ", i + 1), Style::default().fg(DIM)),
                     Span::styled(display, Style::default().fg(DIM)),
                 ]));
             }
         }
     }
-
-    lines.push(Line::from(""));
+    f.render_widget(Paragraph::new(token_lines), chunks[1]);
 
     // Input line
     let prompt_style = if input_focused {
@@ -460,28 +471,27 @@ fn draw_token_input(f: &mut Frame, app: &App) {
     } else {
         Style::default().fg(DIM)
     };
-    let mut input_spans = vec![
-        Span::styled(if input_focused { " ▸ " } else { "   " }, prompt_style),
-        Span::styled("Add: ", prompt_style),
-    ];
-    input_spans.push(Span::styled(&app.token_input, Style::default().fg(if input_focused { TEXT } else { DIM })));
-    if input_focused {
-        input_spans.push(Span::styled("▌", Style::default().fg(CYAN)));
-    }
-    lines.push(Line::from(input_spans));
+    let input_text = format!(
+        "  {} Add: {}{}",
+        if input_focused { ">" } else { " " },
+        app.token_input,
+        if input_focused { "_" } else { "" },
+    );
+    let input_line = Paragraph::new(Line::from(Span::styled(
+        input_text,
+        if input_focused { Style::default().fg(TEXT) } else { Style::default().fg(DIM) },
+    )));
+    f.render_widget(input_line, chunks[3]);
 
     // Status message
     if let Some(msg) = &app.status_message {
-        lines.push(Line::from(""));
         let color = if msg.is_error { RED } else { GREEN };
-        lines.push(Line::from(vec![
-            Span::styled("   ", Style::default()),
+        let status = Paragraph::new(Line::from(vec![
+            Span::styled("    ", Style::default()),
             Span::styled(&msg.text, Style::default().fg(color)),
         ]));
+        f.render_widget(status, chunks[4]);
     }
-
-    let paragraph = Paragraph::new(lines);
-    f.render_widget(paragraph, inner);
 }
 
 fn mask_token(token: &str) -> String {
