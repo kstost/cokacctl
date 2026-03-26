@@ -23,11 +23,20 @@ impl TaskSchedulerManager {
 
 impl ServiceManager for TaskSchedulerManager {
     fn start(&self, binary_path: &Path, tokens: &[String]) -> Result<(), String> {
-        dlog!("taskscheduler", "start() called - binary: {}, tokens: {}", binary_path.display(), tokens.len());
+        dlog!("taskscheduler", "========== start() BEGIN ==========");
+        dlog!("taskscheduler", "binary_path: '{}'", binary_path.display());
+        dlog!("taskscheduler", "binary_path exists: {}", binary_path.exists());
+        dlog!("taskscheduler", "tokens count: {}", tokens.len());
+        for (i, t) in tokens.iter().enumerate() {
+            dlog!("taskscheduler", "token[{}]: '{}...{}'", i,
+                &t[..t.len().min(6)],
+                if t.len() > 6 { &t[t.len()-4..] } else { "" });
+        }
 
         // Remove existing task first
-        dlog!("taskscheduler", "Removing existing task...");
-        let _ = self.remove();
+        dlog!("taskscheduler", "[step 1/4] Removing existing task...");
+        let remove_result = self.remove();
+        dlog!("taskscheduler", "remove result: {:?}", remove_result);
 
         let token_args = tokens.join(" ");
         let args_str = format!("--ccserver -- {}", token_args);
@@ -37,6 +46,11 @@ impl ServiceManager for TaskSchedulerManager {
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_default()
             .replace('\'', "''");
+
+        dlog!("taskscheduler", "[step 2/4] Building PowerShell script");
+        dlog!("taskscheduler", "  binary (escaped): '{}'", binary);
+        dlog!("taskscheduler", "  args (escaped): '{}'", args);
+        dlog!("taskscheduler", "  working_dir: '{}'", home);
 
         let script = format!(
             "$action = New-ScheduledTaskAction -Execute '{binary}' -Argument '{args}' -WorkingDirectory '{wd}'\n\
@@ -48,31 +62,47 @@ impl ServiceManager for TaskSchedulerManager {
             name = TASK_NAME,
         );
 
-        dlog!("taskscheduler", "Creating scheduled task via PowerShell...");
+        dlog!("taskscheduler", "Full PowerShell script:\n{}", script);
+        dlog!("taskscheduler", "[step 3/4] Executing Register-ScheduledTask...");
+
+        let t0 = std::time::Instant::now();
         let output = Self::powershell(&script)?;
+        let elapsed = t0.elapsed();
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        dlog!("taskscheduler", "Register exit: {}, stdout: '{}', stderr: '{}'",
-            output.status, stdout.trim(), stderr.trim());
+        dlog!("taskscheduler", "Register took: {:?}", elapsed);
+        dlog!("taskscheduler", "Register exit code: {}", output.status);
+        dlog!("taskscheduler", "Register stdout: '{}'", stdout.trim());
+        dlog!("taskscheduler", "Register stderr: '{}'", stderr.trim());
 
         if !output.status.success() {
+            dlog!("taskscheduler", "========== start() FAILED at Register ==========");
             return Err(format!("Task creation failed: {}", stderr.trim()));
         }
 
         // Start the task immediately
-        dlog!("taskscheduler", "Starting task...");
+        dlog!("taskscheduler", "[step 4/4] Executing Start-ScheduledTask...");
         let start_script = format!("Start-ScheduledTask -TaskName '{}'", TASK_NAME);
-        let start_output = Self::powershell(&start_script)?;
+        dlog!("taskscheduler", "Start script: {}", start_script);
 
+        let t1 = std::time::Instant::now();
+        let start_output = Self::powershell(&start_script)?;
+        let start_elapsed = t1.elapsed();
+
+        let start_stdout = String::from_utf8_lossy(&start_output.stdout);
         let start_stderr = String::from_utf8_lossy(&start_output.stderr);
-        dlog!("taskscheduler", "Start exit: {}, stderr: '{}'", start_output.status, start_stderr.trim());
+        dlog!("taskscheduler", "Start took: {:?}", start_elapsed);
+        dlog!("taskscheduler", "Start exit code: {}", start_output.status);
+        dlog!("taskscheduler", "Start stdout: '{}'", start_stdout.trim());
+        dlog!("taskscheduler", "Start stderr: '{}'", start_stderr.trim());
 
         if !start_output.status.success() {
+            dlog!("taskscheduler", "========== start() FAILED at Start ==========");
             return Err(format!("Task start failed: {}", start_stderr.trim()));
         }
 
-        dlog!("taskscheduler", "start() completed successfully");
+        dlog!("taskscheduler", "========== start() SUCCESS ==========");
         Ok(())
     }
 
