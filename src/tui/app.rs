@@ -50,18 +50,29 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
+        dlog!("app", "App::new() - loading config...");
         let config = Config::load();
+        dlog!("app", "Config loaded: {} tokens", config.tokens.len());
+
+        dlog!("app", "Finding cokacdir...");
         let cokacdir_path = platform::find_cokacdir();
+        dlog!("app", "cokacdir_path: {:?}", cokacdir_path);
+
         let cokacdir_version = cokacdir_path
             .as_ref()
             .and_then(|p| version::installed_version(p));
+        dlog!("app", "cokacdir_version: {:?}", cokacdir_version);
+
+        dlog!("app", "Querying initial service status...");
         let service_status = service::manager().status();
+        dlog!("app", "Service status: {:?}", service_status);
 
         let initial_view = if cokacdir_version.is_some() {
             View::Dashboard
         } else {
             View::Welcome
         };
+        dlog!("app", "Initial view: {:?}", initial_view);
 
         App {
             running: true,
@@ -86,20 +97,25 @@ impl App {
     }
 
     pub fn refresh_status(&mut self) {
+        dlog!("app", "refresh_status()");
         self.service_status = service::manager().status();
+        dlog!("app", "Service status: {:?}", self.service_status);
         self.config = Config::load();
     }
 
     pub fn refresh_cokacdir_info(&mut self) {
+        dlog!("app", "refresh_cokacdir_info()");
         let cokacdir_path = platform::find_cokacdir();
         self.cokacdir_version = cokacdir_path
             .as_ref()
             .and_then(|p| version::installed_version(p));
         self.cokacdir_path = cokacdir_path.map(|p| p.to_string_lossy().to_string());
+        dlog!("app", "cokacdir version: {:?}, path: {:?}", self.cokacdir_version, self.cokacdir_path);
         self.refresh_status();
     }
 
     pub fn set_status(&mut self, msg: &str, is_error: bool) {
+        dlog!("app", "set_status: '{}' (error: {})", msg, is_error);
         let duration = if is_error { 3 } else { 1 };
         self.status_message = Some(StatusMessage {
             text: msg.to_string(),
@@ -129,6 +145,7 @@ impl App {
     }
 
     pub fn enter_token_input(&mut self) {
+        dlog!("app", "enter_token_input()");
         self.token_input.clear();
         self.token_list = self.config.tokens.clone();
         self.token_cursor = None;
@@ -136,6 +153,7 @@ impl App {
     }
 
     pub fn start_progress(&mut self, action: ProgressAction) {
+        dlog!("app", "start_progress({:?})", action);
         let (tx, rx) = std::sync::mpsc::channel();
         self.progress_action = Some(action.clone());
         self.progress_lines.clear();
@@ -145,12 +163,14 @@ impl App {
 
         match action {
             ProgressAction::Install => {
+                dlog!("app", "Spawning install thread");
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let _ = rt.block_on(crate::cli::install::run_bg(tx));
                 });
             }
             ProgressAction::Update => {
+                dlog!("app", "Spawning update thread");
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let _ = rt.block_on(crate::cli::update::run_bg(tx));
@@ -169,17 +189,19 @@ impl App {
         loop {
             match rx.try_recv() {
                 Ok(ProgressMsg::Log(line)) => {
+                    dlog!("app", "Progress log: {}", line);
                     self.progress_lines.push(line);
                     got_any = true;
                 }
                 Ok(ProgressMsg::Done(result)) => {
+                    dlog!("app", "Progress done: {:?}", result);
                     self.progress_done = Some(result);
                     got_any = true;
                     break;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    // Sender dropped without Done — treat as error
+                    dlog!("app", "Progress channel disconnected");
                     if self.progress_done.is_none() {
                         self.progress_done = Some(Err("Operation terminated unexpectedly.".into()));
                     }

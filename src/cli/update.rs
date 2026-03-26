@@ -10,16 +10,19 @@ fn send(tx: &Option<ProgressTx>, msg: String) {
 
 /// CLI entry point.
 pub async fn run() -> Result<(), String> {
+    dlog!("update", "CLI run()");
     run_inner(&None).await
 }
 
 /// TUI entry point.
 pub async fn run_bg(tx: ProgressTx) -> Result<(), String> {
+    dlog!("update", "TUI run_bg()");
     let tx_opt = Some(tx);
     let result = run_inner(&tx_opt).await;
     if let Some(tx) = &tx_opt {
         tx.send(ProgressMsg::Done(result.clone())).ok();
     }
+    dlog!("update", "run_bg() result: {:?}", result);
     result
 }
 
@@ -27,58 +30,64 @@ async fn run_inner(tx: &Option<ProgressTx>) -> Result<(), String> {
     let os = platform::Os::detect();
     let arch = platform::Arch::detect();
 
-    // Find installed binary
+    dlog!("update", "Finding installed binary...");
     let binary_path = platform::find_cokacdir().ok_or(
         "cokacdir not found. Run 'cokacctl install' first.".to_string(),
     )?;
+    dlog!("update", "Found: {}", binary_path.display());
 
-    // Get current version
     let current = version::installed_version(&binary_path).ok_or(
         "Cannot determine installed cokacdir version.".to_string(),
     )?;
+    dlog!("update", "Current version: {}", current);
     send(tx, format!("  Current version: v{}", current));
 
-    // Check latest
     send(tx, "  Checking for updates...".into());
+    dlog!("update", "Fetching latest version...");
     let latest = version::latest_version()
         .await
         .ok_or("Cannot fetch latest version info.".to_string())?;
+    dlog!("update", "Latest version: {}", latest);
     send(tx, format!("  Latest version:  v{}", latest));
 
     if !version::is_newer(&latest, &current) {
+        dlog!("update", "Already up to date");
         send(tx, "  Already up to date!".into());
         return Ok(());
     }
 
+    dlog!("update", "Updating {} -> {}", current, latest);
     send(tx, format!("  Updating v{} → v{}...", current, latest));
 
-    // Check if service is running, stop it first
     let mgr = crate::service::manager();
     let was_running = mgr.status() == crate::service::ServiceStatus::Running;
+    dlog!("update", "Service was_running: {}", was_running);
     if was_running {
         send(tx, "  Stopping service for update...".into());
+        dlog!("update", "Stopping service...");
         mgr.stop().ok();
     }
 
-    // Download new binary
     let url = platform::binary_download_url(os, arch);
+    dlog!("update", "Download URL: {}", url);
 
-    // On Unix, may need sudo for /usr/local/bin
     #[cfg(unix)]
     {
         let parent = binary_path.parent().unwrap_or(std::path::Path::new("/"));
         if !is_writable_dir(parent) {
+            dlog!("update", "Not writable, using sudo");
             return update_with_sudo(&url, &binary_path, was_running, tx).await;
         }
     }
 
     download::download_to_path(&url, &binary_path, tx).await?;
+    dlog!("update", "Download complete");
     send(tx, format!("  Updated to v{}", latest));
 
-    // Restart service if it was running
     if was_running {
         let config = Config::load();
         if !config.tokens.is_empty() {
+            dlog!("update", "Restarting service...");
             send(tx, "  Restarting service...".into());
             mgr.start(&binary_path, &config.tokens).ok();
         }
@@ -106,6 +115,7 @@ async fn update_with_sudo(
     was_running: bool,
     tx: &Option<ProgressTx>,
 ) -> Result<(), String> {
+    dlog!("update", "update_with_sudo()");
     let tmp = std::env::temp_dir().join("cokacdir_update_tmp");
     download::download_to_path(url, &tmp, tx).await?;
 
@@ -120,6 +130,7 @@ async fn update_with_sudo(
         .map_err(|e| format!("sudo mv failed: {}", e))?;
 
     if !status.success() {
+        dlog!("update", "sudo mv failed");
         return Err("sudo mv failed. Cannot update binary.".into());
     }
 
@@ -127,11 +138,13 @@ async fn update_with_sudo(
         .args(["chmod", "+x", &dest.to_string_lossy()])
         .status();
 
+    dlog!("update", "Binary updated via sudo");
     send(tx, "  Binary updated.".into());
 
     if was_running {
         let config = crate::core::config::Config::load();
         if !config.tokens.is_empty() {
+            dlog!("update", "Restarting service after sudo update...");
             send(tx, "  Restarting service...".into());
             let mgr = crate::service::manager();
             mgr.start(dest, &config.tokens).ok();

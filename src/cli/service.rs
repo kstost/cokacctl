@@ -5,14 +5,17 @@ use crate::service::{self, ServiceManager, ServiceStatus};
 use std::io::{BufRead, BufReader};
 
 pub fn run(action: ServiceAction) -> Result<(), String> {
+    dlog!("cli::service", "run({:?})", action);
     let mgr = service::manager();
 
     match action {
         ServiceAction::Start { tokens } => {
             let tokens = dedup_tokens(tokens);
+            dlog!("cli::service", "start: {} tokens", tokens.len());
             let binary_path = platform::find_cokacdir().ok_or(
                 "cokacdir not found in PATH. Run 'cokacctl install' first.".to_string(),
             )?;
+            dlog!("cli::service", "Binary: {}", binary_path.display());
 
             println!("  Starting cokacdir service...");
             println!("  Binary: {}", binary_path.display());
@@ -20,25 +23,28 @@ pub fn run(action: ServiceAction) -> Result<(), String> {
 
             mgr.start(&binary_path, &tokens)?;
 
-            // Save tokens to config
             let mut config = Config::load();
             config.tokens = tokens;
             config.install_path = Some(binary_path.to_string_lossy().to_string());
             config.save()?;
 
+            dlog!("cli::service", "Service started, config saved");
             println!("  Service started.");
             print_management_hints(&*mgr);
             Ok(())
         }
 
         ServiceAction::Stop => {
+            dlog!("cli::service", "stop");
             println!("  Stopping cokacdir service...");
             mgr.stop()?;
+            dlog!("cli::service", "Service stopped");
             println!("  Service stopped.");
             Ok(())
         }
 
         ServiceAction::Restart => {
+            dlog!("cli::service", "restart");
             let config = Config::load();
             if config.tokens.is_empty() {
                 return Err(
@@ -51,19 +57,24 @@ pub fn run(action: ServiceAction) -> Result<(), String> {
 
             println!("  Restarting cokacdir service...");
             mgr.restart(&binary_path, &config.tokens)?;
+            dlog!("cli::service", "Service restarted");
             println!("  Service restarted.");
             Ok(())
         }
 
         ServiceAction::Remove => {
+            dlog!("cli::service", "remove");
             println!("  Removing cokacdir service...");
             mgr.remove()?;
+            dlog!("cli::service", "Service removed");
             println!("  Service removed.");
             Ok(())
         }
 
         ServiceAction::Status => {
+            dlog!("cli::service", "status");
             let status = mgr.status();
+            dlog!("cli::service", "Status: {:?}", status);
             let symbol = match &status {
                 ServiceStatus::Running => "\x1b[32m●\x1b[0m",
                 ServiceStatus::Stopped => "\x1b[31m●\x1b[0m",
@@ -83,18 +94,21 @@ pub fn run(action: ServiceAction) -> Result<(), String> {
         }
 
         ServiceAction::Log => {
+            dlog!("cli::service", "log");
             let log_path = mgr
                 .log_path()
                 .ok_or("Log file path not available.".to_string())?;
             if !log_path.exists() {
                 return Err(format!("Log file not found: {}", log_path.display()));
             }
+            dlog!("cli::service", "Tailing: {}", log_path.display());
             println!("  Tailing {}...\n", log_path.display());
             tail_file(&log_path)
         }
 
         ServiceAction::Token { tokens } => {
             let tokens = dedup_tokens(tokens);
+            dlog!("cli::service", "token: {} tokens", tokens.len());
             let binary_path = platform::find_cokacdir().ok_or(
                 "cokacdir not found in PATH.".to_string(),
             )?;
@@ -106,6 +120,7 @@ pub fn run(action: ServiceAction) -> Result<(), String> {
             config.tokens = tokens;
             config.save()?;
 
+            dlog!("cli::service", "Tokens updated, service restarted");
             println!("  Tokens updated and service restarted.");
             Ok(())
         }
@@ -131,7 +146,6 @@ fn print_management_hints(mgr: &dyn ServiceManager) {
 }
 
 fn tail_file(path: &std::path::Path) -> Result<(), String> {
-    // Print last 20 lines, then follow
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Cannot read log: {}", e))?;
     let lines: Vec<&str> = content.lines().collect();
@@ -140,7 +154,6 @@ fn tail_file(path: &std::path::Path) -> Result<(), String> {
         println!("{}", line);
     }
 
-    // Follow new lines
     let file = std::fs::File::open(path)
         .map_err(|e| format!("Cannot open log: {}", e))?;
     let metadata = file.metadata()

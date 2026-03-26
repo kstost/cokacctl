@@ -11,6 +11,7 @@ pub struct LaunchdManager {
 
 impl LaunchdManager {
     pub fn new() -> Self {
+        dlog!("launchd", "LaunchdManager created");
         LaunchdManager {
             paths: ServicePaths::for_current_os(),
         }
@@ -88,7 +89,8 @@ impl LaunchdManager {
 
 impl ServiceManager for LaunchdManager {
     fn start(&self, binary_path: &Path, tokens: &[String]) -> Result<(), String> {
-        // Create directories
+        dlog!("launchd", "start() called - binary: {}, tokens: {}", binary_path.display(), tokens.len());
+
         std::fs::create_dir_all(&self.paths.log_dir)
             .map_err(|e| format!("Cannot create log dir: {}", e))?;
         if let Some(parent) = self.paths.service_file.parent() {
@@ -96,8 +98,8 @@ impl ServiceManager for LaunchdManager {
                 .map_err(|e| format!("Cannot create LaunchAgents dir: {}", e))?;
         }
 
-        // Write wrapper script
         let wrapper = Self::generate_wrapper(binary_path, tokens);
+        dlog!("launchd", "Writing wrapper to: {}", self.paths.wrapper_script.display());
         std::fs::write(&self.paths.wrapper_script, &wrapper)
             .map_err(|e| format!("Cannot write wrapper: {}", e))?;
         #[cfg(unix)]
@@ -110,11 +112,11 @@ impl ServiceManager for LaunchdManager {
             .ok();
         }
 
-        // Stop existing service if running
+        dlog!("launchd", "Stopping existing service...");
         let _ = self.stop();
 
-        // Write plist
         let plist = self.generate_plist(&self.paths.wrapper_script);
+        dlog!("launchd", "Writing plist to: {}", self.paths.service_file.display());
         std::fs::write(&self.paths.service_file, &plist)
             .map_err(|e| format!("Cannot write plist: {}", e))?;
         #[cfg(unix)]
@@ -127,13 +129,13 @@ impl ServiceManager for LaunchdManager {
             .ok();
         }
 
-        // Enable
         let domain = Self::domain();
+        dlog!("launchd", "Enabling service in domain: {}", domain);
         let _ = Command::new("launchctl")
             .args(["enable", &format!("{}/{}", domain, LABEL)])
             .output();
 
-        // Bootstrap
+        dlog!("launchd", "Bootstrapping service...");
         let result = Command::new("launchctl")
             .args([
                 "bootstrap",
@@ -145,13 +147,16 @@ impl ServiceManager for LaunchdManager {
 
         if !result.status.success() {
             let stderr = String::from_utf8_lossy(&result.stderr);
+            dlog!("launchd", "Bootstrap failed: {}", stderr);
             return Err(format!("launchctl bootstrap failed: {}", stderr));
         }
 
+        dlog!("launchd", "start() completed successfully");
         Ok(())
     }
 
     fn stop(&self) -> Result<(), String> {
+        dlog!("launchd", "stop() called");
         let domain = Self::domain();
         let result = Command::new("launchctl")
             .args(["bootout", &format!("{}/{}", domain, LABEL)])
@@ -160,28 +165,37 @@ impl ServiceManager for LaunchdManager {
 
         if !result.status.success() {
             let stderr = String::from_utf8_lossy(&result.stderr);
-            // Not an error if service wasn't running
             if !stderr.contains("No such process") && !stderr.contains("Could not find service") {
+                dlog!("launchd", "stop() failed: {}", stderr);
                 return Err(format!("launchctl bootout failed: {}", stderr));
             }
+            dlog!("launchd", "stop(): service was not running");
+        } else {
+            dlog!("launchd", "stop() success");
         }
         Ok(())
     }
 
     fn remove(&self) -> Result<(), String> {
+        dlog!("launchd", "remove() called");
         self.stop().ok();
         if self.paths.service_file.exists() {
+            dlog!("launchd", "Removing plist: {}", self.paths.service_file.display());
             std::fs::remove_file(&self.paths.service_file)
                 .map_err(|e| format!("Cannot remove plist: {}", e))?;
         }
         if self.paths.wrapper_script.exists() {
+            dlog!("launchd", "Removing wrapper: {}", self.paths.wrapper_script.display());
             std::fs::remove_file(&self.paths.wrapper_script).ok();
         }
+        dlog!("launchd", "remove() complete");
         Ok(())
     }
 
     fn status(&self) -> ServiceStatus {
+        dlog!("launchd", "status() called");
         if !self.paths.service_file.exists() {
+            dlog!("launchd", "status(): plist not found -> NotInstalled");
             return ServiceStatus::NotInstalled;
         }
         let output = Command::new("launchctl")
@@ -191,12 +205,17 @@ impl ServiceManager for LaunchdManager {
             Ok(out) => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 if stdout.contains(LABEL) {
+                    dlog!("launchd", "status(): Running");
                     ServiceStatus::Running
                 } else {
+                    dlog!("launchd", "status(): Stopped");
                     ServiceStatus::Stopped
                 }
             }
-            Err(_) => ServiceStatus::Unknown("Cannot query launchctl".into()),
+            Err(e) => {
+                dlog!("launchd", "status() query failed: {}", e);
+                ServiceStatus::Unknown("Cannot query launchctl".into())
+            }
         }
     }
 

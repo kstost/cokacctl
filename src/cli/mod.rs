@@ -13,7 +13,7 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum Commands {
     /// Install cokacdir binary
     Install,
@@ -28,7 +28,7 @@ pub enum Commands {
     Status,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum ServiceAction {
     /// Register and start the service
     Start {

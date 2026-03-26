@@ -5,20 +5,24 @@ const CARGO_TOML_URL: &str =
 
 /// Get the installed cokacdir version by running `cokacdir --version`.
 pub fn installed_version(binary_path: &std::path::Path) -> Option<String> {
+    dlog!("version", "Getting installed version from: {}", binary_path.display());
     let output = Command::new(binary_path).arg("--version").output().ok()?;
     if !output.status.success() {
+        dlog!("version", "cokacdir --version failed (exit: {})", output.status);
         return None;
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // Expected format: "cokacdir 0.4.67"
-    stdout
+    let ver = stdout
         .trim()
         .strip_prefix("cokacdir ")
-        .map(|v| v.trim().to_string())
+        .map(|v| v.trim().to_string());
+    dlog!("version", "Installed version: {:?}", ver);
+    ver
 }
 
 /// Fetch the latest cokacdir version from the GitHub Cargo.toml.
 pub async fn latest_version() -> Option<String> {
+    dlog!("version", "Fetching latest version from {}", CARGO_TOML_URL);
     let client = reqwest::Client::new();
     let resp = client
         .get(CARGO_TOML_URL)
@@ -26,8 +30,11 @@ pub async fn latest_version() -> Option<String> {
         .send()
         .await
         .ok()?;
+    dlog!("version", "HTTP response status: {}", resp.status());
     let text = resp.text().await.ok()?;
-    parse_version_from_cargo_toml(&text)
+    let ver = parse_version_from_cargo_toml(&text);
+    dlog!("version", "Latest version parsed: {:?}", ver);
+    ver
 }
 
 /// Parse `version = "x.x.x"` from Cargo.toml content.

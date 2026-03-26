@@ -17,24 +17,36 @@ impl Config {
     /// Config file path: ~/.cokacdir/cokacctl.json
     pub fn path() -> PathBuf {
         let home = dirs::home_dir().expect("Cannot determine home directory");
-        home.join(".cokacdir").join(CONFIG_FILENAME)
+        let path = home.join(".cokacdir").join(CONFIG_FILENAME);
+        dlog!("config", "Config path: {}", path.display());
+        path
     }
 
     /// Load config from disk. Returns default if file doesn't exist.
     pub fn load() -> Self {
         let path = Self::path();
         if !path.exists() {
+            dlog!("config", "Config file not found, using defaults");
             return Config::default();
         }
         let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => return Config::default(),
+            Ok(c) => {
+                dlog!("config", "Config file read ({} bytes)", c.len());
+                c
+            }
+            Err(e) => {
+                dlog!("config", "Failed to read config: {}", e);
+                return Config::default();
+            }
         };
-        serde_json::from_str(&content).unwrap_or_default()
+        let config: Config = serde_json::from_str(&content).unwrap_or_default();
+        dlog!("config", "Config loaded: {} tokens", config.tokens.len());
+        config
     }
 
     /// Save config to disk with restricted permissions.
     pub fn save(&self) -> Result<(), String> {
+        dlog!("config", "Saving config ({} tokens)...", self.tokens.len());
         let path = Self::path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -52,6 +64,7 @@ impl Config {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
         }
 
+        dlog!("config", "Config saved to {}", path.display());
         Ok(())
     }
 }

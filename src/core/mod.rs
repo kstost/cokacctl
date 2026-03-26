@@ -1,3 +1,5 @@
+#[macro_use]
+pub mod debug;
 pub mod platform;
 pub mod version;
 pub mod download;

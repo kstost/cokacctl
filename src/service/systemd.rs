@@ -11,6 +11,7 @@ pub struct SystemdManager {
 
 impl SystemdManager {
     pub fn new() -> Self {
+        dlog!("systemd", "SystemdManager created");
         SystemdManager {
             paths: ServicePaths::for_current_os(),
         }
@@ -46,16 +47,21 @@ impl SystemdManager {
         match output {
             Some(out) if out.status.success() => {
                 let stdout = String::from_utf8_lossy(&out.stdout);
-                stdout
+                let ver = stdout
                     .lines()
                     .next()
                     .and_then(|line| {
                         line.split_whitespace()
                             .find_map(|w| w.parse::<u32>().ok())
                     })
-                    .unwrap_or(0)
+                    .unwrap_or(0);
+                dlog!("systemd", "systemd version: {}", ver);
+                ver
             }
-            _ => 0,
+            _ => {
+                dlog!("systemd", "Failed to detect systemd version");
+                0
+            }
         }
     }
 
@@ -105,12 +111,14 @@ impl SystemdManager {
 
 impl ServiceManager for SystemdManager {
     fn start(&self, binary_path: &Path, tokens: &[String]) -> Result<(), String> {
-        // Check systemctl
+        dlog!("systemd", "start() called - binary: {}, tokens: {}", binary_path.display(), tokens.len());
+
         if Command::new("systemctl").arg("--version").output().is_err() {
+            dlog!("systemd", "systemctl not found");
             return Err("systemctl not found. This tool requires systemd.".into());
         }
 
-        // Create directories
+        dlog!("systemd", "Creating directories...");
         std::fs::create_dir_all(&self.paths.log_dir)
             .map_err(|e| format!("Cannot create log dir: {}", e))?;
         if let Some(parent) = self.paths.service_file.parent() {
@@ -118,8 +126,8 @@ impl ServiceManager for SystemdManager {
                 .map_err(|e| format!("Cannot create systemd dir: {}", e))?;
         }
 
-        // Write wrapper script
         let wrapper = Self::generate_wrapper(binary_path, tokens);
+        dlog!("systemd", "Writing wrapper to: {}", self.paths.wrapper_script.display());
         std::fs::write(&self.paths.wrapper_script, &wrapper)
             .map_err(|e| format!("Cannot write wrapper: {}", e))?;
         #[cfg(unix)]
@@ -132,13 +140,13 @@ impl ServiceManager for SystemdManager {
             .ok();
         }
 
-        // Stop existing
+        dlog!("systemd", "Stopping existing service...");
         let _ = Command::new("systemctl")
             .args(["--user", "stop", SERVICE_NAME])
             .output();
 
-        // Write service file
         let service = self.generate_service();
+        dlog!("systemd", "Writing service file to: {}", self.paths.service_file.display());
         std::fs::write(&self.paths.service_file, &service)
             .map_err(|e| format!("Cannot write service file: {}", e))?;
         #[cfg(unix)]
@@ -151,44 +159,49 @@ impl ServiceManager for SystemdManager {
             .ok();
         }
 
-        // daemon-reload
+        dlog!("systemd", "Running daemon-reload...");
         let r = Command::new("systemctl")
             .args(["--user", "daemon-reload"])
             .output()
             .map_err(|e| format!("daemon-reload failed: {}", e))?;
         if !r.status.success() {
+            dlog!("systemd", "daemon-reload failed");
             return Err("systemctl daemon-reload failed".into());
         }
 
-        // enable
+        dlog!("systemd", "Enabling service...");
         let r = Command::new("systemctl")
             .args(["--user", "enable", SERVICE_NAME])
             .output()
             .map_err(|e| format!("enable failed: {}", e))?;
         if !r.status.success() {
+            dlog!("systemd", "enable failed");
             return Err("systemctl enable failed".into());
         }
 
-        // restart
+        dlog!("systemd", "Restarting service...");
         let r = Command::new("systemctl")
             .args(["--user", "restart", SERVICE_NAME])
             .output()
             .map_err(|e| format!("restart failed: {}", e))?;
         if !r.status.success() {
+            dlog!("systemd", "restart failed");
             return Err("systemctl restart failed".into());
         }
 
-        // enable-linger
         if let Some(user) = std::env::var("USER").ok() {
+            dlog!("systemd", "Enabling linger for user: {}", user);
             let _ = Command::new("loginctl")
                 .args(["enable-linger", &user])
                 .output();
         }
 
+        dlog!("systemd", "start() completed successfully");
         Ok(())
     }
 
     fn stop(&self) -> Result<(), String> {
+        dlog!("systemd", "stop() called");
         let r = Command::new("systemctl")
             .args(["--user", "stop", SERVICE_NAME])
             .output()
@@ -196,13 +209,18 @@ impl ServiceManager for SystemdManager {
         if !r.status.success() {
             let stderr = String::from_utf8_lossy(&r.stderr);
             if !stderr.contains("not loaded") && !stderr.contains("not found") {
+                dlog!("systemd", "stop() failed: {}", stderr);
                 return Err(format!("systemctl stop failed: {}", stderr));
             }
+            dlog!("systemd", "stop(): service was not loaded");
+        } else {
+            dlog!("systemd", "stop() success");
         }
         Ok(())
     }
 
     fn remove(&self) -> Result<(), String> {
+        dlog!("systemd", "remove() called");
         let _ = Command::new("systemctl")
             .args(["--user", "stop", SERVICE_NAME])
             .output();
@@ -210,20 +228,25 @@ impl ServiceManager for SystemdManager {
             .args(["--user", "disable", SERVICE_NAME])
             .output();
         if self.paths.service_file.exists() {
+            dlog!("systemd", "Removing service file: {}", self.paths.service_file.display());
             std::fs::remove_file(&self.paths.service_file)
                 .map_err(|e| format!("Cannot remove service file: {}", e))?;
         }
         if self.paths.wrapper_script.exists() {
+            dlog!("systemd", "Removing wrapper: {}", self.paths.wrapper_script.display());
             std::fs::remove_file(&self.paths.wrapper_script).ok();
         }
         let _ = Command::new("systemctl")
             .args(["--user", "daemon-reload"])
             .output();
+        dlog!("systemd", "remove() complete");
         Ok(())
     }
 
     fn status(&self) -> ServiceStatus {
+        dlog!("systemd", "status() called");
         if !self.paths.service_file.exists() {
+            dlog!("systemd", "status(): service file not found -> NotInstalled");
             return ServiceStatus::NotInstalled;
         }
         let output = Command::new("systemctl")
@@ -232,13 +255,17 @@ impl ServiceManager for SystemdManager {
         match output {
             Ok(out) => {
                 let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                dlog!("systemd", "status(): systemctl is-active = '{}'", state);
                 match state.as_str() {
                     "active" => ServiceStatus::Running,
                     "inactive" | "failed" => ServiceStatus::Stopped,
                     _ => ServiceStatus::Unknown(state),
                 }
             }
-            Err(_) => ServiceStatus::Unknown("Cannot query systemctl".into()),
+            Err(e) => {
+                dlog!("systemd", "status() query failed: {}", e);
+                ServiceStatus::Unknown("Cannot query systemctl".into())
+            }
         }
     }
 
