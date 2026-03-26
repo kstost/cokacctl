@@ -103,6 +103,36 @@ impl ServiceManager for TaskSchedulerManager {
             return Err(format!("Task start failed: {}", start_stderr.trim()));
         }
 
+        // Wait briefly then check if the process is actually running
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        dlog!("taskscheduler", "Checking if cokacdir.exe is running after start...");
+        let check = Command::new("tasklist")
+            .args(["/FI", "IMAGENAME eq cokacdir.exe", "/FO", "CSV", "/NH"])
+            .output();
+        if let Ok(ref out) = check {
+            let stdout = decode_output(&out.stdout);
+            dlog!("taskscheduler", "Post-start tasklist: '{}'", stdout.trim());
+            if !stdout.contains("cokacdir.exe") {
+                dlog!("taskscheduler", "WARNING: cokacdir.exe not found after Start-ScheduledTask!");
+                dlog!("taskscheduler", "Trying direct process spawn as fallback...");
+                // Fallback: spawn cokacdir directly as a detached process
+                let child = Command::new(binary_path)
+                    .args(["--ccserver", "--"])
+                    .args(tokens)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+                match child {
+                    Ok(c) => dlog!("taskscheduler", "Direct spawn OK, pid: {}", c.id()),
+                    Err(e) => {
+                        dlog!("taskscheduler", "Direct spawn failed: {}", e);
+                        return Err(format!("Failed to start cokacdir: {}", e));
+                    }
+                }
+            }
+        }
+
         dlog!("taskscheduler", "========== start() SUCCESS ==========");
         Ok(())
     }
