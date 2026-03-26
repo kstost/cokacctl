@@ -37,8 +37,8 @@ impl ServiceManager for TaskSchedulerManager {
                 "/Create",
                 "/TN", TASK_NAME,
                 "/TR", &tr,
-                "/SC", "ONLOGON",
-                "/RL", "LIMITED",
+                "/SC", "DAILY",
+                "/ST", "00:00",
                 "/F",
             ])
             .output()
