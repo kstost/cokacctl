@@ -1,4 +1,4 @@
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::time::Duration;
 
 use super::app::{App, ProgressAction, View};
@@ -11,6 +11,9 @@ use crate::service;
 pub fn handle_events(app: &mut App) -> bool {
     if event::poll(Duration::from_millis(200)).unwrap_or(false) {
         if let Ok(Event::Key(key)) = event::read() {
+            if key.kind != KeyEventKind::Press {
+                return true;
+            }
             return handle_key(app, key);
         }
     }
