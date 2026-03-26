@@ -63,8 +63,10 @@ function Main {
     # Verify
     if (Test-Path $installPath) {
         Add-ToPath $installDir
-        Success "Installed! Run 'cokacctl' to start."
-        Info "Restart your terminal for PATH changes to take effect."
+        Success "Installed!"
+
+        # Run cokacctl
+        & $installPath @args
     } else {
         Error "Installation failed"
     }

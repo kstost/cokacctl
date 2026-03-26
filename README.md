@@ -4,23 +4,25 @@
 
 Install, update, and manage cokacdir as a background service — all from a single command or interactive TUI. Supports systemd (Linux), launchd (macOS), and Task Scheduler (Windows).
 
-## Installation
+## Quick Start
+
+Copy and paste one line — downloads, installs, and launches automatically:
 
 **macOS / Linux:**
 
-```bash
+```
 curl -fsSL https://raw.githubusercontent.com/kstost/cokacctl/refs/heads/main/manage.sh | bash
 ```
 
 **Windows (PowerShell):**
 
-```powershell
+```
 irm https://raw.githubusercontent.com/kstost/cokacctl/refs/heads/main/manage.ps1 | iex
 ```
 
 ## Usage
 
-Run without arguments to launch the interactive TUI:
+After installation, run directly:
 
 ```bash
 cokacctl

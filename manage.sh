@@ -185,7 +185,10 @@ main() {
         # Setup shell wrapper
         setup_shell
 
-        success "Installed! Run 'cokacctl' to start."
+        success "Installed!"
+
+        # Run cokacctl
+        exec "$install_path" "$@"
     else
         error "Installation failed"
     fi
