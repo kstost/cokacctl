@@ -1,0 +1,192 @@
+use crate::core::config::Config;
+use crate::core::platform;
+use crate::core::version;
+use crate::core::ProgressMsg;
+use crate::service::{self, ServiceStatus};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum View {
+    Welcome,
+    TokenInput,
+    Progress,
+    Dashboard,
+    LogFullscreen,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProgressAction {
+    Install,
+    Update,
+}
+
+#[derive(Debug, Clone)]
+pub struct StatusMessage {
+    pub text: String,
+    pub is_error: bool,
+    pub expires_at: std::time::Instant,
+}
+
+pub struct App {
+    pub running: bool,
+    pub view: View,
+    pub cokacdir_version: Option<String>,
+    pub latest_version: Option<String>,
+    pub cokacdir_path: Option<String>,
+    pub service_status: ServiceStatus,
+    pub config: Config,
+    pub log_lines: Vec<String>,
+    pub log_scroll_offset: usize,
+    pub status_message: Option<StatusMessage>,
+    pub checking_update: bool,
+    pub token_input: String,
+    pub token_list: Vec<String>,
+    pub token_cursor: Option<usize>,
+    // Progress view state
+    pub progress_action: Option<ProgressAction>,
+    pub progress_lines: Vec<String>,
+    pub progress_rx: Option<std::sync::mpsc::Receiver<ProgressMsg>>,
+    pub progress_done: Option<Result<(), String>>,
+}
+
+impl App {
+    pub fn new() -> Self {
+        let config = Config::load();
+        let cokacdir_path = platform::find_cokacdir();
+        let cokacdir_version = cokacdir_path
+            .as_ref()
+            .and_then(|p| version::installed_version(p));
+        let service_status = service::manager().status();
+
+        let initial_view = if cokacdir_version.is_some() {
+            View::Dashboard
+        } else {
+            View::Welcome
+        };
+
+        App {
+            running: true,
+            view: initial_view,
+            cokacdir_version,
+            latest_version: None,
+            cokacdir_path: cokacdir_path.map(|p| p.to_string_lossy().to_string()),
+            service_status,
+            config,
+            log_lines: Vec::new(),
+            log_scroll_offset: 0,
+            status_message: None,
+            checking_update: true,
+            token_input: String::new(),
+            token_list: Vec::new(),
+            token_cursor: None,
+            progress_action: None,
+            progress_lines: Vec::new(),
+            progress_rx: None,
+            progress_done: None,
+        }
+    }
+
+    pub fn refresh_status(&mut self) {
+        self.service_status = service::manager().status();
+        self.config = Config::load();
+    }
+
+    pub fn refresh_cokacdir_info(&mut self) {
+        let cokacdir_path = platform::find_cokacdir();
+        self.cokacdir_version = cokacdir_path
+            .as_ref()
+            .and_then(|p| version::installed_version(p));
+        self.cokacdir_path = cokacdir_path.map(|p| p.to_string_lossy().to_string());
+        self.refresh_status();
+    }
+
+    pub fn set_status(&mut self, msg: &str, is_error: bool) {
+        let duration = if is_error { 3 } else { 1 };
+        self.status_message = Some(StatusMessage {
+            text: msg.to_string(),
+            is_error,
+            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(duration),
+        });
+    }
+
+    pub fn expire_status(&mut self) {
+        if let Some(msg) = &self.status_message {
+            if std::time::Instant::now() >= msg.expires_at {
+                self.status_message = None;
+            }
+        }
+    }
+
+    pub fn update_available(&self) -> bool {
+        if let (Some(latest), Some(current)) = (&self.latest_version, &self.cokacdir_version) {
+            version::is_newer(latest, current)
+        } else {
+            false
+        }
+    }
+
+    pub fn token_count(&self) -> usize {
+        self.config.tokens.len()
+    }
+
+    pub fn enter_token_input(&mut self) {
+        self.token_input.clear();
+        self.token_list = self.config.tokens.clone();
+        self.token_cursor = None;
+        self.view = View::TokenInput;
+    }
+
+    pub fn start_progress(&mut self, action: ProgressAction) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.progress_action = Some(action.clone());
+        self.progress_lines.clear();
+        self.progress_done = None;
+        self.progress_rx = Some(rx);
+        self.view = View::Progress;
+
+        match action {
+            ProgressAction::Install => {
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let _ = rt.block_on(crate::cli::install::run_bg(tx));
+                });
+            }
+            ProgressAction::Update => {
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let _ = rt.block_on(crate::cli::update::run_bg(tx));
+                });
+            }
+        }
+    }
+
+    /// Poll progress channel, returns true if there were new messages.
+    pub fn poll_progress(&mut self) -> bool {
+        let rx = match &self.progress_rx {
+            Some(rx) => rx,
+            None => return false,
+        };
+        let mut got_any = false;
+        loop {
+            match rx.try_recv() {
+                Ok(ProgressMsg::Log(line)) => {
+                    self.progress_lines.push(line);
+                    got_any = true;
+                }
+                Ok(ProgressMsg::Done(result)) => {
+                    self.progress_done = Some(result);
+                    got_any = true;
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // Sender dropped without Done — treat as error
+                    if self.progress_done.is_none() {
+                        self.progress_done = Some(Err("Operation terminated unexpectedly.".into()));
+                    }
+                    break;
+                }
+            }
+        }
+        got_any
+    }
+}
