@@ -85,9 +85,21 @@ pub fn fallback_install_path() -> PathBuf {
     dir.join("cokacdir")
 }
 
-/// Find cokacdir binary in PATH.
+/// Find cokacdir binary in PATH or default install location.
 pub fn find_cokacdir() -> Option<PathBuf> {
-    which("cokacdir")
+    if let Some(p) = which("cokacdir") {
+        return Some(p);
+    }
+    // Fallback: check default install path
+    let default = default_install_path(Os::detect());
+    if default.is_file() {
+        return Some(default);
+    }
+    let fallback = fallback_install_path();
+    if fallback.is_file() {
+        return Some(fallback);
+    }
+    None
 }
 
 /// Simple which implementation.
