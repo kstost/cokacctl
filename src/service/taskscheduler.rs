@@ -36,14 +36,15 @@ impl TaskSchedulerManager {
     /// Generate a VBS wrapper that runs cokacdir with a hidden window.
     /// Used by both the scheduled task (logon auto-start) and ensures
     /// no console window flashes on screen.
-    fn generate_wrapper(binary_path: &Path, tokens: &[String], error_log: &Path) -> String {
+    fn generate_wrapper(binary_path: &Path, tokens: &[String], log_path: &Path, error_log: &Path) -> String {
         let binary = binary_path.to_string_lossy();
+        let log_path = log_path.to_string_lossy();
         let error_log = error_log.to_string_lossy();
         let token_args = tokens.join(" ");
-        // Build: cmd /c "binary" --ccserver -- tokens 2>>"error_log"
+        // Build: cmd /c "binary" --ccserver -- tokens >>"log" 2>>"error_log"
         let cmd = format!(
-            "cmd /c \"{}\" --ccserver -- {} 2>>\"{}\"",
-            binary, token_args, error_log
+            "cmd /c \"{}\" --ccserver -- {} >>\"{}\" 2>>\"{}\"",
+            binary, token_args, log_path, error_log
         );
         // In VBS strings, " is escaped as ""
         let vbs_cmd = cmd.replace('"', "\"\"");
@@ -80,7 +81,8 @@ impl ServiceManager for TaskSchedulerManager {
         // Generate VBS wrapper for hidden execution (no console window)
         dlog!("taskscheduler", "[step 2/4] Generating VBS wrapper...");
         let wrapper_path = cokacdir_dir.join("run.vbs");
-        let wrapper = Self::generate_wrapper(binary_path, tokens, &error_log_path);
+        let log_path = log_dir.join("cokacdir.log");
+        let wrapper = Self::generate_wrapper(binary_path, tokens, &log_path, &error_log_path);
         std::fs::write(&wrapper_path, &wrapper)
             .map_err(|e| format!("Cannot write VBS wrapper: {}", e))?;
         dlog!("taskscheduler", "VBS wrapper written to: {}", wrapper_path.display());
@@ -120,6 +122,10 @@ impl ServiceManager for TaskSchedulerManager {
 
         // Start cokacdir directly with hidden window (no Start-ScheduledTask, no window flash)
         dlog!("taskscheduler", "[step 4/4] Starting cokacdir directly...");
+        let stdout_stdio = std::fs::OpenOptions::new()
+            .create(true).append(true).open(&log_path)
+            .map(std::process::Stdio::from)
+            .unwrap_or_else(|_| std::process::Stdio::null());
         let stderr_stdio = std::fs::File::create(&error_log_path)
             .map(std::process::Stdio::from)
             .unwrap_or_else(|_| std::process::Stdio::null());
@@ -128,7 +134,7 @@ impl ServiceManager for TaskSchedulerManager {
             .args(["--ccserver", "--"])
             .args(tokens)
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
+            .stdout(stdout_stdio)
             .stderr(stderr_stdio)
             .spawn();
 
