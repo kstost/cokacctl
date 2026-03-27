@@ -1,7 +1,7 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{block::Title, Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
+use ratatui::widgets::{block::Title, Block, BorderType, Borders, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::app::{App, View};
@@ -19,7 +19,15 @@ const TEXT: Color = Color::Indexed(252);    // Primary text
 const LABEL: Color = Color::Indexed(246);   // Label text
 
 pub fn draw(f: &mut Frame, app: &App) {
-    f.render_widget(Clear, f.area());
+    // Reset every cell in the buffer to prevent ghosting.
+    // Without this, ratatui's double-buffer retains 2-frame-old content
+    // in cells that no widget writes to, causing visual artifacts on view transitions.
+    let area = f.area();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            f.buffer_mut().get_mut(x, y).reset();
+        }
+    }
     match app.view {
         View::Welcome => draw_welcome(f, app),
         View::TokenInput => draw_token_input(f, app),

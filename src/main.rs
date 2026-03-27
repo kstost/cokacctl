@@ -176,9 +176,15 @@ fn run_tui() {
         .unwrap_or(0);
 
     let mut tick_count: u32 = 0;
+    let mut prev_view = app.view.clone();
 
     dlog!("tui", "Entering main loop");
     loop {
+        if app.view != prev_view {
+            dlog!("tui", "View changed: {:?} -> {:?}, clearing terminal", prev_view, app.view);
+            terminal.clear().ok();
+            prev_view = app.view.clone();
+        }
         terminal
             .draw(|f| tui::draw::draw(f, &app))
             .expect("Failed to draw");
