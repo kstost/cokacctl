@@ -32,6 +32,10 @@ pub fn draw(f: &mut Frame, app: &App) {
 
 fn draw_dashboard(f: &mut Frame, app: &App) {
     let size = f.area();
+
+    // Clear entire area first to prevent ghosting from fullscreen views
+    f.render_widget(Block::default(), size);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
