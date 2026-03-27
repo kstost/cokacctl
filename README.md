@@ -13,13 +13,13 @@ Copy and paste one line — downloads cokacctl, installs it, and launches automa
 **macOS / Linux:**
 
 ```
-curl -fsSL https://raw.githubusercontent.com/kstost/cokacctl/refs/heads/main/manage.sh | bash && cokacctl
+curl -fsSL https://cokacdir.cokac.com/manage.sh | bash && cokacctl
 ```
 
 **Windows (PowerShell):**
 
 ```
-irm https://raw.githubusercontent.com/kstost/cokacctl/refs/heads/main/manage.ps1 | iex; cokacctl
+irm https://cokacdir.cokac.com/manage.ps1 | iex; cokacctl
 ```
 
 After the installer runs, the interactive TUI launches. From there you can install cokacdir, register tokens, and start the service — all with keyboard shortcuts.
