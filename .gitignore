@@ -22,8 +22,9 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Logs
+# Logs and debug
 *.log
+*.png
 
 # Environment
 .env

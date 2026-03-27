@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 
 /// Master switch for debug logging. Set to false to disable all debug output.
-pub const DEBUG_ENABLED: bool = true;
+pub const DEBUG_ENABLED: bool = false;
 
 static LOG_FILE: OnceLock<Mutex<Option<std::fs::File>>> = OnceLock::new();
 

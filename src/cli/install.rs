@@ -96,7 +96,7 @@ async fn run_inner(tx: &Option<ProgressTx>) -> Result<(), String> {
 
 async fn install_with_sudo(url: &str, dest: &std::path::Path, was_running: bool, tx: &Option<ProgressTx>) -> Result<(), String> {
     dlog!("install", "install_with_sudo()");
-    let tmp = std::env::temp_dir().join("cokacdir_download_tmp");
+    let tmp = std::env::temp_dir().join(format!("cokacdir_dl_{}", std::process::id()));
     download::download_to_path(url, &tmp, tx).await?;
 
     let mut cmd = std::process::Command::new("sudo");

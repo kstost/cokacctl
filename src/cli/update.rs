@@ -116,7 +116,7 @@ async fn update_with_sudo(
     tx: &Option<ProgressTx>,
 ) -> Result<(), String> {
     dlog!("update", "update_with_sudo()");
-    let tmp = std::env::temp_dir().join("cokacdir_update_tmp");
+    let tmp = std::env::temp_dir().join(format!("cokacdir_up_{}", std::process::id()));
     download::download_to_path(url, &tmp, tx).await?;
 
     send(tx, "  Requires elevated privileges. Using sudo...".into());

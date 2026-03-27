@@ -28,30 +28,31 @@ impl ServiceManager for TaskSchedulerManager {
         dlog!("taskscheduler", "binary_path: '{}'", binary_path.display());
         dlog!("taskscheduler", "binary_path exists: {}", binary_path.exists());
         dlog!("taskscheduler", "tokens count: {}", tokens.len());
-        for (i, t) in tokens.iter().enumerate() {
-            dlog!("taskscheduler", "token[{}]: '{}...{}'", i,
-                &t[..t.len().min(6)],
-                if t.len() > 6 { &t[t.len()-4..] } else { "" });
-        }
 
         // Remove existing task first
         dlog!("taskscheduler", "[step 1/4] Removing existing task...");
         let remove_result = self.remove();
         dlog!("taskscheduler", "remove result: {:?}", remove_result);
 
+        // PowerShell single-quoted strings: only ' needs escaping as ''
+        // Inside '...', $, `, ; are all literal — no injection possible
+        let escape_ps_single = |s: &str| -> String {
+            s.replace('\'', "''")
+        };
+
         let token_args = tokens.join(" ");
         let args_str = format!("--ccserver -- {}", token_args);
-        let binary = binary_path.to_string_lossy().replace('\'', "''");
-        let args = args_str.replace('\'', "''");
+        let binary = escape_ps_single(&binary_path.to_string_lossy());
+        let args = escape_ps_single(&args_str);
         let home = dirs::home_dir()
             .map(|h| h.to_string_lossy().to_string())
-            .unwrap_or_default()
-            .replace('\'', "''");
+            .unwrap_or_default();
+        let home = escape_ps_single(&home);
 
         dlog!("taskscheduler", "[step 2/4] Building PowerShell script");
-        dlog!("taskscheduler", "  binary (escaped): '{}'", binary);
-        dlog!("taskscheduler", "  args (escaped): '{}'", args);
+        dlog!("taskscheduler", "  binary: '{}'", binary);
         dlog!("taskscheduler", "  working_dir: '{}'", home);
+        dlog!("taskscheduler", "  token count in args: {}", tokens.len());
 
         let script = format!(
             "$action = New-ScheduledTaskAction -Execute '{binary}' -Argument '{args}' -WorkingDirectory '{wd}'\n\
@@ -63,7 +64,7 @@ impl ServiceManager for TaskSchedulerManager {
             name = TASK_NAME,
         );
 
-        dlog!("taskscheduler", "Full PowerShell script:\n{}", script);
+        dlog!("taskscheduler", "[step 2/4] Script built (tokens redacted)");
         dlog!("taskscheduler", "[step 3/4] Executing Register-ScheduledTask...");
 
         let t0 = std::time::Instant::now();
