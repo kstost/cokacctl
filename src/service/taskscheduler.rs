@@ -33,26 +33,6 @@ impl TaskSchedulerManager {
             .map_err(|e| format!("PowerShell execution failed: {}", e))
     }
 
-    /// Generate a VBS wrapper that runs cokacdir with a hidden window.
-    /// Used by both the scheduled task (logon auto-start) and ensures
-    /// no console window flashes on screen.
-    fn generate_wrapper(binary_path: &Path, tokens: &[String], log_path: &Path, error_log: &Path) -> String {
-        let binary = binary_path.to_string_lossy();
-        let log_path = log_path.to_string_lossy();
-        let error_log = error_log.to_string_lossy();
-        let token_args = tokens.join(" ");
-        // Build: cmd /c "binary" --ccserver -- tokens >>"log" 2>>"error_log"
-        let cmd = format!(
-            "cmd /c \"{}\" --ccserver -- {} >>\"{}\" 2>>\"{}\"",
-            binary, token_args, log_path, error_log
-        );
-        // In VBS strings, " is escaped as ""
-        let vbs_cmd = cmd.replace('"', "\"\"");
-        format!(
-            "Set oShell = CreateObject(\"WScript.Shell\")\noShell.Run \"{}\", 0, True\n",
-            vbs_cmd
-        )
-    }
 }
 
 impl ServiceManager for TaskSchedulerManager {
@@ -63,11 +43,11 @@ impl ServiceManager for TaskSchedulerManager {
         dlog!("taskscheduler", "tokens count: {}", tokens.len());
 
         // Remove existing task first
-        dlog!("taskscheduler", "[step 1/4] Removing existing task...");
+        dlog!("taskscheduler", "[step 1/3] Removing existing task...");
         let remove_result = self.remove();
         dlog!("taskscheduler", "remove result: {:?}", remove_result);
 
-        // Prepare paths
+        // Prepare log directory
         let home = dirs::home_dir()
             .ok_or("Cannot determine home directory")?;
         let cokacdir_dir = home.join(".cokacdir");
@@ -78,29 +58,21 @@ impl ServiceManager for TaskSchedulerManager {
         // Truncate error log so we only capture fresh errors
         let _ = std::fs::File::create(&error_log_path);
 
-        // Generate VBS wrapper for hidden execution (no console window)
-        dlog!("taskscheduler", "[step 2/4] Generating VBS wrapper...");
-        let wrapper_path = cokacdir_dir.join("run.vbs");
-        let log_path = log_dir.join("cokacdir.log");
-        let wrapper = Self::generate_wrapper(binary_path, tokens, &log_path, &error_log_path);
-        std::fs::write(&wrapper_path, &wrapper)
-            .map_err(|e| format!("Cannot write VBS wrapper: {}", e))?;
-        dlog!("taskscheduler", "VBS wrapper written to: {}", wrapper_path.display());
-
-        // Register scheduled task with wscript.exe for logon auto-start (no visible window)
-        // PowerShell single-quoted strings: only ' needs escaping as ''
+        // Register scheduled task with cokacdir.exe directly
         let escape_ps_single = |s: &str| -> String {
             s.replace('\'', "''")
         };
-        let wrapper_arg = format!("//B //Nologo \"{}\"", wrapper_path.to_string_lossy());
+        let token_args = tokens.join(" ");
+        let argument = format!("--ccserver -- {}", token_args);
 
-        dlog!("taskscheduler", "[step 3/4] Registering scheduled task...");
+        dlog!("taskscheduler", "[step 2/3] Registering scheduled task...");
         let script = format!(
-            "$action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument '{args}' -WorkingDirectory '{wd}'\n\
+            "$action = New-ScheduledTaskAction -Execute '{exe}' -Argument '{args}' -WorkingDirectory '{wd}'\n\
              $trigger = New-ScheduledTaskTrigger -AtLogon\n\
-             $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)\n\
-             Register-ScheduledTask -TaskName '{name}' -Action $action -Trigger $trigger -Settings $settings -Force",
-            args = escape_ps_single(&wrapper_arg),
+             $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Highest\n\
+             Register-ScheduledTask -TaskName '{name}' -Action $action -Trigger $trigger -Principal $principal -Force",
+            exe = escape_ps_single(&binary_path.to_string_lossy()),
+            args = escape_ps_single(&argument),
             wd = escape_ps_single(&home.to_string_lossy()),
             name = TASK_NAME,
         );
@@ -121,46 +93,37 @@ impl ServiceManager for TaskSchedulerManager {
             return Err(format!("Task creation failed: {}", stderr.trim()));
         }
 
-        // Start cokacdir directly with hidden window (no Start-ScheduledTask, no window flash)
-        dlog!("taskscheduler", "[step 4/4] Starting cokacdir directly...");
-        let stdout_stdio = std::fs::OpenOptions::new()
-            .create(true).append(true).open(&log_path)
-            .map(std::process::Stdio::from)
-            .unwrap_or_else(|_| std::process::Stdio::null());
-        let stderr_stdio = std::fs::File::create(&error_log_path)
-            .map(std::process::Stdio::from)
-            .unwrap_or_else(|_| std::process::Stdio::null());
+        // Start the scheduled task immediately
+        dlog!("taskscheduler", "[step 3/3] Starting scheduled task...");
+        let start_output = Self::powershell(&format!(
+            "Start-ScheduledTask -TaskName '{}'", TASK_NAME
+        ))?;
 
-        let child = Self::cmd(binary_path)
-            .args(["--ccserver", "--"])
-            .args(tokens)
-            .stdin(std::process::Stdio::null())
-            .stdout(stdout_stdio)
-            .stderr(stderr_stdio)
-            .spawn();
+        let start_stderr = decode_output(&start_output.stderr);
+        dlog!("taskscheduler", "Start-ScheduledTask exit: {}, stderr: '{}'", start_output.status, start_stderr.trim());
 
-        match child {
-            Ok(mut c) => {
-                dlog!("taskscheduler", "Direct spawn OK, pid: {}", c.id());
-                // Check if process survives startup
-                std::thread::sleep(std::time::Duration::from_millis(2000));
-                match c.try_wait() {
-                    Ok(Some(exit_status)) => {
-                        let err_output = std::fs::read_to_string(&error_log_path).unwrap_or_default();
-                        dlog!("taskscheduler", "Process exited immediately: {}, stderr: '{}'", exit_status, err_output.trim());
-                        return Err(format!("cokacdir exited immediately ({}): {}", exit_status, err_output.trim()));
-                    }
-                    Ok(None) => {
-                        dlog!("taskscheduler", "Process still running after 2s - OK");
-                    }
-                    Err(e) => {
-                        dlog!("taskscheduler", "try_wait error: {}", e);
-                    }
+        if !start_output.status.success() {
+            dlog!("taskscheduler", "========== start() FAILED at Start ==========");
+            return Err(format!("Task start failed: {}", start_stderr.trim()));
+        }
+
+        // Wait briefly and verify process is running
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+        match Self::cmd("tasklist")
+            .args(["/FI", "IMAGENAME eq cokacdir.exe", "/FO", "CSV", "/NH"])
+            .output()
+        {
+            Ok(tl_output) => {
+                let tl_stdout = decode_output(&tl_output.stdout);
+                if !tl_stdout.contains("cokacdir.exe") {
+                    let err_output = std::fs::read_to_string(&error_log_path).unwrap_or_default();
+                    dlog!("taskscheduler", "Process not found after start: '{}'", err_output.trim());
+                    return Err(format!("cokacdir exited immediately: {}", err_output.trim()));
                 }
+                dlog!("taskscheduler", "Process running after 2s - OK");
             }
             Err(e) => {
-                dlog!("taskscheduler", "Direct spawn failed: {}", e);
-                return Err(format!("Failed to start cokacdir: {}", e));
+                dlog!("taskscheduler", "tasklist check failed: {}", e);
             }
         }
 
