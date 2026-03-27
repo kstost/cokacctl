@@ -1,7 +1,7 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{block::Title, Block, BorderType, Borders, Padding, Paragraph, Wrap};
+use ratatui::widgets::{block::Title, Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::app::{App, View};
@@ -19,6 +19,7 @@ const TEXT: Color = Color::Indexed(252);    // Primary text
 const LABEL: Color = Color::Indexed(246);   // Label text
 
 pub fn draw(f: &mut Frame, app: &App) {
+    f.render_widget(Clear, f.area());
     match app.view {
         View::Welcome => draw_welcome(f, app),
         View::TokenInput => draw_token_input(f, app),
@@ -32,10 +33,6 @@ pub fn draw(f: &mut Frame, app: &App) {
 
 fn draw_dashboard(f: &mut Frame, app: &App) {
     let size = f.area();
-
-    // Clear entire area first to prevent ghosting from fullscreen views
-    f.render_widget(Block::default(), size);
-
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -388,9 +385,6 @@ fn draw_welcome(f: &mut Frame, _app: &App) {
 fn draw_token_input(f: &mut Frame, app: &App) {
     let size = f.area();
     let input_focused = app.token_cursor.is_none();
-
-    // Clear entire area first to prevent ghosting
-    f.render_widget(Block::default(), size);
 
     // Fixed layout — token list takes all remaining space
     let chunks = Layout::default()
