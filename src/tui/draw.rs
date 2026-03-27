@@ -384,16 +384,17 @@ fn draw_welcome(f: &mut Frame, _app: &App) {
 fn draw_token_input(f: &mut Frame, app: &App) {
     let size = f.area();
     let input_focused = app.token_cursor.is_none();
-    let token_count = app.token_list.len().max(1) as u16;
 
-    // Split screen like dashboard does — directly from f.area()
+    // Clear entire area first to prevent ghosting
+    f.render_widget(Block::default(), size);
+
+    // Fixed layout — token list takes all remaining space
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(4),                  // guide panel
-            Constraint::Length(token_count + 2),    // token list panel (+ border)
+            Constraint::Min(5),                     // token list panel (flexible)
             Constraint::Length(3),                  // input panel
-            Constraint::Min(0),                     // spacer
             Constraint::Length(1),                  // status bar
         ])
         .split(size);
@@ -503,7 +504,7 @@ fn draw_token_input(f: &mut Frame, app: &App) {
             Style::default().fg(DIM),
         ))
     };
-    f.render_widget(Paragraph::new(line), chunks[4]);
+    f.render_widget(Paragraph::new(line), chunks[3]);
 }
 
 fn mask_token(token: &str) -> String {
