@@ -37,13 +37,33 @@ fn run_cli(command: Commands) {
             dlog!("main::cli", "Running update command");
             rt.block_on(cli::update::run())
         }
-        Commands::Service { action } => {
-            dlog!("main::cli", "Running service command: {:?}", action);
-            cli::service::run(action)
-        }
         Commands::Status => {
             dlog!("main::cli", "Running status command");
             run_status()
+        }
+        Commands::Start => {
+            dlog!("main::cli", "Running start command");
+            cli::service::start()
+        }
+        Commands::Stop => {
+            dlog!("main::cli", "Running stop command");
+            cli::service::stop()
+        }
+        Commands::Restart => {
+            dlog!("main::cli", "Running restart command");
+            cli::service::restart()
+        }
+        Commands::Remove => {
+            dlog!("main::cli", "Running remove command");
+            cli::service::remove()
+        }
+        Commands::Log => {
+            dlog!("main::cli", "Running log command");
+            cli::service::log()
+        }
+        Commands::Token { tokens } => {
+            dlog!("main::cli", "Running token command");
+            cli::service::token(tokens)
         }
     };
 
