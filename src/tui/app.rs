@@ -238,6 +238,9 @@ impl App {
                 dlog!("app", "Service action failed: {}", e);
                 self.service_action_rx = None;
                 self.service_busy = false;
+                for line in e.lines() {
+                    self.log_lines.push(line.to_string());
+                }
                 self.set_status(&format!("Failed: {}", e), true);
                 self.refresh_status();
             }

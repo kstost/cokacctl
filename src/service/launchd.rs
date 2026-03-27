@@ -135,6 +135,10 @@ impl ServiceManager for LaunchdManager {
             .args(["enable", &format!("{}/{}", domain, LABEL)])
             .output();
 
+        // Truncate error log before starting so we only capture fresh errors
+        let error_log_path = self.paths.log_dir.join("cokacdir.error.log");
+        let _ = std::fs::File::create(&error_log_path);
+
         dlog!("launchd", "Bootstrapping service...");
         let result = Command::new("launchctl")
             .args([
@@ -149,6 +153,21 @@ impl ServiceManager for LaunchdManager {
             let stderr = String::from_utf8_lossy(&result.stderr);
             dlog!("launchd", "Bootstrap failed: {}", stderr);
             return Err(format!("launchctl bootstrap failed: {}", stderr));
+        }
+
+        // Check if service actually stays running
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+        let status = self.status();
+        if status != ServiceStatus::Running {
+            let err_output = std::fs::read_to_string(&error_log_path).unwrap_or_default();
+            let tail: String = err_output.lines().rev().take(10)
+                .collect::<Vec<_>>().into_iter().rev()
+                .collect::<Vec<_>>().join("\n");
+            dlog!("launchd", "Service not running after bootstrap. Error log: '{}'", tail.trim());
+            if !tail.trim().is_empty() {
+                return Err(tail.trim().to_string());
+            }
+            return Err("Service started but exited immediately".into());
         }
 
         dlog!("launchd", "start() completed successfully");
