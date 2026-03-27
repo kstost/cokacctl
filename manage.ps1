@@ -11,7 +11,7 @@ $BASE_URL = "https://raw.githubusercontent.com/kstost/cokacctl/refs/heads/main/d
 function Info($msg) { Write-Host "→ $msg" -ForegroundColor Blue }
 function Success($msg) { Write-Host "✓ $msg" -ForegroundColor Green }
 function Warn($msg) { Write-Host "! $msg" -ForegroundColor Yellow }
-function Error($msg) { Write-Host "✗ $msg" -ForegroundColor Red; exit 1 }
+function Error($msg) { Write-Host "✗ $msg" -ForegroundColor Red; throw $msg }
 
 # Detect architecture
 function Detect-Arch {
@@ -53,11 +53,18 @@ function Main {
     $installDir = Get-InstallDir
     $installPath = Join-Path $installDir "${BINARY_NAME}.exe"
 
+    # Stop running instances to release file lock
+    if (Test-Path $installPath) {
+        Stop-Process -Name $BINARY_NAME -Force -ErrorAction SilentlyContinue
+        Stop-Process -Name "cokacdir" -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 1
+    }
+
     # Download
     try {
         Invoke-WebRequest -Uri $url -OutFile $installPath -UseBasicParsing
     } catch {
-        Error "Download failed: $_"
+        Error "Download failed: $_`n  If cokacctl is running, close it first and try again."
     }
 
     # Verify
@@ -71,4 +78,4 @@ function Main {
     }
 }
 
-Main
+try { Main } catch { }
