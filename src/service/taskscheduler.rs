@@ -13,9 +13,21 @@ impl TaskSchedulerManager {
         TaskSchedulerManager
     }
 
+    /// Create a Command with CREATE_NO_WINDOW flag on Windows
+    /// to prevent console windows from flashing during TUI operation.
+    fn cmd<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+        let mut cmd = Command::new(program);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        cmd
+    }
+
     fn powershell(script: &str) -> Result<std::process::Output, String> {
         dlog!("taskscheduler", "PowerShell: {}", script);
-        Command::new("powershell")
+        Self::cmd("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
             .output()
             .map_err(|e| format!("PowerShell execution failed: {}", e))
@@ -107,7 +119,7 @@ impl ServiceManager for TaskSchedulerManager {
         // Wait briefly then check if the process is actually running
         std::thread::sleep(std::time::Duration::from_millis(1500));
         dlog!("taskscheduler", "Checking if cokacdir.exe is running after start...");
-        let check = Command::new("tasklist")
+        let check = Self::cmd("tasklist")
             .args(["/FI", "IMAGENAME eq cokacdir.exe", "/FO", "CSV", "/NH"])
             .output();
         if let Ok(ref out) = check {
@@ -117,15 +129,42 @@ impl ServiceManager for TaskSchedulerManager {
                 dlog!("taskscheduler", "WARNING: cokacdir.exe not found after Start-ScheduledTask!");
                 dlog!("taskscheduler", "Trying direct process spawn as fallback...");
                 // Fallback: spawn cokacdir directly as a detached process
-                let child = Command::new(binary_path)
+                // Redirect stderr to a file so we can capture crash reasons
+                let stderr_path = dirs::home_dir()
+                    .unwrap_or_default()
+                    .join(".cokacdir")
+                    .join("debug")
+                    .join("cokacdir_start.log");
+                let stderr_stdio = std::fs::File::create(&stderr_path)
+                    .map(std::process::Stdio::from)
+                    .unwrap_or_else(|_| std::process::Stdio::null());
+
+                let child = Self::cmd(binary_path)
                     .args(["--ccserver", "--"])
                     .args(tokens)
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
+                    .stderr(stderr_stdio)
                     .spawn();
                 match child {
-                    Ok(c) => dlog!("taskscheduler", "Direct spawn OK, pid: {}", c.id()),
+                    Ok(mut c) => {
+                        dlog!("taskscheduler", "Direct spawn OK, pid: {}", c.id());
+                        // Check if process survives startup
+                        std::thread::sleep(std::time::Duration::from_millis(2000));
+                        match c.try_wait() {
+                            Ok(Some(exit_status)) => {
+                                let err_output = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+                                dlog!("taskscheduler", "Process exited immediately: {}, stderr: '{}'", exit_status, err_output.trim());
+                                return Err(format!("cokacdir exited immediately ({}): {}", exit_status, err_output.trim()));
+                            }
+                            Ok(None) => {
+                                dlog!("taskscheduler", "Process still running after 2s - OK");
+                            }
+                            Err(e) => {
+                                dlog!("taskscheduler", "try_wait error: {}", e);
+                            }
+                        }
+                    }
                     Err(e) => {
                         dlog!("taskscheduler", "Direct spawn failed: {}", e);
                         return Err(format!("Failed to start cokacdir: {}", e));
@@ -151,7 +190,7 @@ impl ServiceManager for TaskSchedulerManager {
         }
 
         // Also kill any running cokacdir process
-        let kill_result = Command::new("taskkill")
+        let kill_result = Self::cmd("taskkill")
             .args(["/IM", "cokacdir.exe", "/F"])
             .output();
         if let Ok(ref out) = kill_result {
@@ -172,7 +211,7 @@ impl ServiceManager for TaskSchedulerManager {
         let _ = self.stop();
 
         // Delete the scheduled task
-        let del_result = Command::new("schtasks")
+        let del_result = Self::cmd("schtasks")
             .args(["/Delete", "/TN", TASK_NAME, "/F"])
             .output();
         if let Ok(ref out) = del_result {
@@ -190,7 +229,7 @@ impl ServiceManager for TaskSchedulerManager {
         dlog!("taskscheduler", "status() called");
 
         // Check if cokacdir.exe process is actually running
-        match Command::new("tasklist")
+        match Self::cmd("tasklist")
             .args(["/FI", "IMAGENAME eq cokacdir.exe", "/FO", "CSV", "/NH"])
             .output()
         {
@@ -209,7 +248,7 @@ impl ServiceManager for TaskSchedulerManager {
         }
 
         // Check if the scheduled task exists
-        match Command::new("schtasks")
+        match Self::cmd("schtasks")
             .args(["/Query", "/TN", TASK_NAME, "/FO", "CSV", "/NH"])
             .output()
         {
