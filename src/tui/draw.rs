@@ -382,47 +382,34 @@ fn draw_welcome(f: &mut Frame, _app: &App) {
 // ── Token Input ────────────────────────────────────────────────
 
 fn draw_token_input(f: &mut Frame, app: &App) {
-    let area = f.area();
+    let size = f.area();
     let input_focused = app.token_cursor.is_none();
+    let token_count = app.token_list.len().max(1) as u16;
 
-    // Outer border
-    let title = format!(" Tokens ({}) ", app.token_list.len());
-    let mut hint_spans = vec![];
-    if input_focused {
-        hint_spans.push(Span::styled(" Enter ", Style::default().fg(Color::Black).bg(ACCENT)));
-        hint_spans.push(Span::styled(" Add ", Style::default().fg(DIM)));
-    }
-    hint_spans.push(Span::styled(" ↑↓ ", Style::default().fg(Color::Black).bg(ACCENT)));
-    hint_spans.push(Span::styled(" Nav ", Style::default().fg(DIM)));
-    hint_spans.push(Span::styled(" Esc ", Style::default().fg(DIM).bg(SUBTLE)));
-    hint_spans.push(Span::styled(" Back ", Style::default().fg(DIM)));
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(SUBTLE))
-        .title(Span::styled(title, Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)))
-        .title(Title::from(Line::from(hint_spans)).alignment(Alignment::Center).position(ratatui::widgets::block::Position::Bottom))
-        .padding(Padding::new(1, 1, 1, 1));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    // Split inner area into fixed rows
-    let token_count = app.token_list.len().max(1);
+    // Split screen like dashboard does — directly from f.area()
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),                          // guide text (2 lines)
-            Constraint::Length(1),                          // blank
-            Constraint::Length(token_count as u16),         // token list
-            Constraint::Length(1),                          // blank
-            Constraint::Length(1),                          // input line
-            Constraint::Min(0),                             // rest (status msg etc)
+            Constraint::Length(4),                  // guide panel
+            Constraint::Length(token_count + 2),    // token list panel (+ border)
+            Constraint::Length(3),                  // input panel
+            Constraint::Min(0),                     // spacer
+            Constraint::Length(1),                  // status bar
         ])
-        .split(inner);
+        .split(size);
 
-    // Guide text
+    // ── Guide panel ──
+    let guide_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(SUBTLE))
+        .title(Span::styled(
+            format!(" Tokens ({}) ", app.token_list.len()),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
+        .padding(Padding::horizontal(1));
+    let guide_inner = guide_block.inner(chunks[0]);
+    f.render_widget(guide_block, chunks[0]);
     let guide = Paragraph::new(vec![
         Line::from(vec![
             Span::styled("Telegram Bot Token", Style::default().fg(TEXT).add_modifier(Modifier::BOLD)),
@@ -434,13 +421,21 @@ fn draw_token_input(f: &mut Frame, app: &App) {
             Span::styled(" on Telegram (/newbot).", Style::default().fg(DIM)),
         ]),
     ]);
-    f.render_widget(guide, chunks[0]);
+    f.render_widget(guide, guide_inner);
 
-    // Token list
+    // ── Token list panel ──
+    let token_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(SUBTLE))
+        .padding(Padding::horizontal(1));
+    let token_inner = token_block.inner(chunks[1]);
+    f.render_widget(token_block, chunks[1]);
+
     let mut token_lines: Vec<Line> = Vec::new();
     if app.token_list.is_empty() {
         token_lines.push(Line::from(Span::styled(
-            "  No tokens registered.",
+            "No tokens registered.",
             Style::default().fg(DIM),
         )));
     } else {
@@ -449,50 +444,66 @@ fn draw_token_input(f: &mut Frame, app: &App) {
             let display = mask_token(token);
             if is_selected {
                 token_lines.push(Line::from(vec![
-                    Span::styled("  > ", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+                    Span::styled(" > ", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
                     Span::styled(format!("{}. ", i + 1), Style::default().fg(CYAN)),
-                    Span::styled(display, Style::default().fg(TEXT)),
+                    Span::styled(display.clone(), Style::default().fg(TEXT)),
                     Span::styled("  ", Style::default()),
                     Span::styled(" Del ", Style::default().fg(Color::White).bg(RED)),
                 ]));
             } else {
                 token_lines.push(Line::from(vec![
-                    Span::styled("    ", Style::default()),
+                    Span::styled("   ", Style::default()),
                     Span::styled(format!("{}. ", i + 1), Style::default().fg(DIM)),
-                    Span::styled(display, Style::default().fg(DIM)),
+                    Span::styled(display.clone(), Style::default().fg(DIM)),
                 ]));
             }
         }
     }
-    f.render_widget(Paragraph::new(token_lines), chunks[2]);
+    f.render_widget(Paragraph::new(token_lines), token_inner);
 
-    // Input line
-    let prompt_style = if input_focused {
-        Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(DIM)
-    };
-    let input_text = format!(
-        "  {} Add: {}{}",
-        if input_focused { ">" } else { " " },
-        app.token_input,
-        if input_focused { "_" } else { "" },
-    );
-    let input_line = Paragraph::new(Line::from(Span::styled(
-        input_text,
-        if input_focused { Style::default().fg(TEXT) } else { Style::default().fg(DIM) },
-    )));
-    f.render_widget(input_line, chunks[4]);
-
-    // Status message
-    if let Some(msg) = &app.status_message {
-        let color = if msg.is_error { RED } else { GREEN };
-        let status = Paragraph::new(Line::from(vec![
-            Span::styled("    ", Style::default()),
-            Span::styled(&msg.text, Style::default().fg(color)),
-        ]));
-        f.render_widget(status, chunks[5]);
+    // ── Input panel ──
+    let mut hint_spans = vec![];
+    if input_focused {
+        hint_spans.push(Span::styled(" Enter ", Style::default().fg(Color::Black).bg(ACCENT)));
+        hint_spans.push(Span::styled(" Add ", Style::default().fg(DIM)));
     }
+    hint_spans.push(Span::styled(" Esc ", Style::default().fg(DIM).bg(SUBTLE)));
+    hint_spans.push(Span::styled(" Back ", Style::default().fg(DIM)));
+
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(if input_focused { CYAN } else { SUBTLE }))
+        .title(Span::styled(" Add Token ", Style::default().fg(ACCENT)))
+        .title(Title::from(Line::from(hint_spans)).alignment(Alignment::Right).position(ratatui::widgets::block::Position::Bottom))
+        .padding(Padding::horizontal(1));
+    let input_inner = input_block.inner(chunks[2]);
+    f.render_widget(input_block, chunks[2]);
+
+    let input_text = if input_focused {
+        format!("{}_", app.token_input)
+    } else {
+        app.token_input.clone()
+    };
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            input_text,
+            Style::default().fg(if input_focused { TEXT } else { DIM }),
+        )),
+        input_inner,
+    );
+
+    // ── Status bar ──
+    let line = if let Some(msg) = &app.status_message {
+        let color = if msg.is_error { RED } else { GREEN };
+        Line::from(Span::styled(&msg.text, Style::default().fg(color)))
+    } else {
+        Line::from(Span::styled(
+            " K: back  ↑↓: navigate tokens",
+            Style::default().fg(DIM),
+        ))
+    };
+    f.render_widget(Paragraph::new(line), chunks[4]);
 }
 
 fn mask_token(token: &str) -> String {
