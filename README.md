@@ -22,7 +22,7 @@ irm https://raw.githubusercontent.com/kstost/cokacctl/refs/heads/main/manage.ps1
 
 ## Usage
 
-After installation, run directly:
+After installation, run without arguments to launch the interactive TUI:
 
 ```bash
 cokacctl
@@ -35,13 +35,13 @@ cokacctl install                  # Install cokacdir
 cokacctl update                   # Update cokacdir to latest version
 cokacctl status                   # Show version, service status, and system info
 
-cokacctl service start <TOKEN>    # Start service with Telegram bot token(s)
-cokacctl service stop             # Stop the service
-cokacctl service restart          # Restart the service
-cokacctl service remove           # Remove the service
-cokacctl service status           # Show service status
-cokacctl service log              # Tail the service log
-cokacctl service token <TOKEN>    # Update bot tokens and restart
+cokacctl token <TOKEN>            # Register a Telegram bot token
+cokacctl token <TOKEN1> <TOKEN2>  # Register multiple bot tokens
+cokacctl start                    # Start service (uses registered tokens)
+cokacctl stop                     # Stop the service
+cokacctl restart                  # Restart the service
+cokacctl remove                   # Remove the service
+cokacctl log                      # Tail the service log
 ```
 
 ## Supported Platforms
@@ -49,6 +49,10 @@ cokacctl service token <TOKEN>    # Update bot tokens and restart
 - macOS (Apple Silicon & Intel)
 - Linux (x86_64 & ARM64)
 - Windows (x86_64 & ARM64)
+
+## Community
+
+[Telegram Group](https://t.me/cokacvibe)
 
 ## License
 
