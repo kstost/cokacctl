@@ -403,7 +403,7 @@ fn draw_token_input(f: &mut Frame, app: &App) {
         .border_style(Style::default().fg(SUBTLE))
         .title(Span::styled(title, Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)))
         .title(Title::from(Line::from(hint_spans)).alignment(Alignment::Center).position(ratatui::widgets::block::Position::Bottom))
-        .padding(Padding::horizontal(1));
+        .padding(Padding::new(1, 1, 1, 1));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -413,7 +413,8 @@ fn draw_token_input(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),                          // guide text (2 lines + blank)
+            Constraint::Length(2),                          // guide text (2 lines)
+            Constraint::Length(1),                          // blank
             Constraint::Length(token_count as u16),         // token list
             Constraint::Length(1),                          // blank
             Constraint::Length(1),                          // input line
@@ -463,7 +464,7 @@ fn draw_token_input(f: &mut Frame, app: &App) {
             }
         }
     }
-    f.render_widget(Paragraph::new(token_lines), chunks[1]);
+    f.render_widget(Paragraph::new(token_lines), chunks[2]);
 
     // Input line
     let prompt_style = if input_focused {
@@ -481,7 +482,7 @@ fn draw_token_input(f: &mut Frame, app: &App) {
         input_text,
         if input_focused { Style::default().fg(TEXT) } else { Style::default().fg(DIM) },
     )));
-    f.render_widget(input_line, chunks[3]);
+    f.render_widget(input_line, chunks[4]);
 
     // Status message
     if let Some(msg) = &app.status_message {
@@ -490,7 +491,7 @@ fn draw_token_input(f: &mut Frame, app: &App) {
             Span::styled("    ", Style::default()),
             Span::styled(&msg.text, Style::default().fg(color)),
         ]));
-        f.render_widget(status, chunks[4]);
+        f.render_widget(status, chunks[5]);
     }
 }
 
