@@ -98,7 +98,8 @@ impl ServiceManager for TaskSchedulerManager {
         let script = format!(
             "$action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument '{args}' -WorkingDirectory '{wd}'\n\
              $trigger = New-ScheduledTaskTrigger -AtLogon\n\
-             Register-ScheduledTask -TaskName '{name}' -Action $action -Trigger $trigger -RunLevel Highest -Force",
+             $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)\n\
+             Register-ScheduledTask -TaskName '{name}' -Action $action -Trigger $trigger -Settings $settings -Force",
             args = escape_ps_single(&wrapper_arg),
             wd = escape_ps_single(&home.to_string_lossy()),
             name = TASK_NAME,

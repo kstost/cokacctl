@@ -1,6 +1,6 @@
 [package]
 name = "cokacctl"
-version = "1.0.12"
+version = "1.0.13"
 edition = "2021"
 authors = ["cokac <monogatree@gmail.com>"]
 description = "cokacdir installation and service manager"
