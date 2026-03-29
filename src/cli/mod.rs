@@ -1,6 +1,7 @@
 pub mod install;
 pub mod update;
 pub mod service;
+pub mod uninstall;
 
 use clap::{Parser, Subcommand};
 
@@ -38,6 +39,9 @@ Monitoring:
 Token Management:
   cokacctl token <T1> <T2> ...      Register one or more bot tokens
                                     (overwrites previously registered tokens)
+
+Cleanup:
+  cokacctl uninstall                Remove all cokacdir data from this system
 
 Interactive Mode:
   cokacctl                          Launch TUI dashboard (no arguments)
@@ -118,5 +122,17 @@ Get tokens from @BotFather on Telegram (/newbot).")]
         /// Telegram bot tokens (space-separated)
         #[arg(required = true)]
         tokens: Vec<String>,
+    },
+
+    /// Stop service and remove all cokacdir binaries, logs, and service files
+    #[command(long_about = "\
+Completely remove all cokacdir-related data from this system. \
+Stops the running service, unregisters it, and deletes all binaries, \
+logs, and service configuration files. \
+The cokacctl config (~/.cokacdir/cokacctl.json) is preserved.")]
+    Uninstall {
+        /// Skip confirmation prompt
+        #[arg(short, long)]
+        yes: bool,
     },
 }

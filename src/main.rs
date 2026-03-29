@@ -65,6 +65,10 @@ fn run_cli(command: Commands) {
             dlog!("main::cli", "Running token command");
             cli::service::token(tokens)
         }
+        Commands::Uninstall { yes } => {
+            dlog!("main::cli", "Running uninstall command (yes={})", yes);
+            cli::uninstall::run(yes)
+        }
     };
 
     if let Err(e) = result {
