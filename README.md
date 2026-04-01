@@ -1,101 +1,162 @@
-# COKACDIR
+# COKACCTL
 
-**이미 쓰고 있는 코딩 에이전트를 텔레그램에서.**
+**Installation & Service Manager for COKACDIR.**
 
-cokacdir은 AI 에이전트가 아닙니다 — LLM이나 추론 엔진을 내장하고 있지 않습니다. 이미 사용 중인 코딩 에이전트(Claude Code, Codex CLI, Gemini CLI, OpenCode)에게 작업을 위임하고, 텔레그램에서 제어할 수 있게 해줍니다. 봇에 메시지를 보내면 에이전트가 코드 실행, 파일 편집, 셸 명령 실행, 결과 실시간 스트리밍까지 모두 처리합니다 — 스마트폰이나 텔레그램이 설치된 어떤 기기에서든 가능합니다.
+Install, update, and manage cokacdir as a background service — all from a single command or interactive TUI. Supports systemd (Linux), launchd (macOS), and Task Scheduler (Windows).
 
-각 에이전트의 기존 구독(또는 무료 티어) 안에서 동작하므로 추가 API 비용이 없습니다.
+cokacdir runs as a Telegram bot. You register your bot token(s) with cokacctl, and it handles running cokacdir in the background as a system service that persists across reboots.
 
-## 빠른 시작
+## Quick Start
+
+Copy and paste one line — downloads cokacctl, installs it, and launches automatically:
 
 **macOS / Linux:**
-```bash
+
+```
 curl -fsSL https://cokacdir.cokac.com/manage.sh | bash && cokacctl
 ```
 
 **Windows (PowerShell):**
-```powershell
+
+```
 irm https://cokacdir.cokac.com/manage.ps1 | iex; cokacctl
 ```
 
-위 명령을 실행하면 cokacdir 관리 TUI가 열립니다. 이후:
+After the installer runs, the interactive TUI launches. From there you can install cokacdir, register tokens, and start the service — all with keyboard shortcuts.
 
-1. **`i`**를 눌러 cokacdir 설치
-2. 설치 완료 후 텔레그램 봇 토큰 입력 ([@BotFather](https://t.me/botfather)에서 생성)
-3. **`s`**를 눌러 서버 시작
+## Usage
 
-끝입니다 — 텔레그램을 열고 봇과 대화를 시작하세요.
+### Interactive TUI
 
-## 주요 기능
+Run without arguments to launch the interactive TUI dashboard:
 
-- **초고속 성능**: Rust로 작성되어 최고의 성능을 제공합니다. 단일 바이너리(플랫폼에 따라 15-20MB), LTO와 strip으로 최적화.
-- **AI 기반 명령**: Claude, Codex, Gemini, OpenCode로 구동되는 자연어 코딩 및 파일 관리. `.`을 누르고 원하는 작업을 설명하세요.
-- **멀티패널 탐색**: 효율적인 파일 관리를 위한 동적 멀티패널 인터페이스
-- **키보드 중심**: 파워 유저를 위한 완전한 키보드 내비게이션
-- **내장 편집기**: 20개 이상 언어의 구문 강조 기능이 있는 파일 편집
-- **이미지 뷰어**: 터미널에서 직접 이미지 보기 (Kitty, iTerm2, Sixel 프로토콜), 줌 및 팬 지원
-- **프로세스 관리자**: 정렬 가능한 컬럼으로 시스템 프로세스 모니터링 및 관리
-- **파일 검색**: 이름 패턴으로 재귀 파일 검색
-- **비교(Diff)**: 폴더 및 파일의 나란히 비교
-- **Git 통합**: 내장 git 상태, 커밋, 로그, 브랜치 관리 및 커밋 간 diff
-- **원격 SSH/SFTP**: 저장된 프로필로 SSH/SFTP 원격 서버 탐색
-- **파일 암호화**: 설정 가능한 청크 분할 방식의 AES-256 암호화
-- **중복 파일 탐지**: 해시 기반 비교로 중복 파일 감지 및 관리
-- **텔레그램 봇**: 스트리밍 출력으로 텔레그램을 통해 AI 코딩 세션을 원격 제어
-- **커스터마이즈 가능한 테마**: JSON 기반의 완전한 색상 커스터마이징이 가능한 라이트/다크 테마
+```bash
+cokacctl
+```
 
-## 커뮤니티
+The TUI provides a full dashboard with:
+- Version info and update availability
+- Service status monitoring (Running / Stopped / Not installed)
+- Log viewer with real-time streaming
+- Keyboard shortcuts for all operations
 
-팁, 업데이트, 지원을 위한 텔레그램 그룹:
-**[@cokacvibe](https://t.me/cokacvibe)**
+**TUI Keyboard Shortcuts:**
 
-## 문서
+| Key | Action |
+|-----|--------|
+| `I` | Install cokacdir |
+| `U` | Update cokacdir |
+| `S` | Start service |
+| `T` | Stop service |
+| `R` | Restart service |
+| `D` | Remove service |
+| `K` | Manage bot tokens |
+| `L` | Full-screen log viewer |
+| `Q` | Quit |
 
-AI 프로바이더 설정, 키보드 단축키, 상세 문서는 다음을 방문하세요:
-**[https://cokacdir.cokac.com](https://cokacdir.cokac.com)**
+### CLI Commands
 
-## 텔레그램 봇
+All TUI features are also available as CLI commands:
 
-**기능:**
-- 멀티 프로바이더 지원 (Claude, Codex, Gemini, OpenCode) 및 실시간 스트리밍
-- 세션 영속성 및 크로스 프로바이더 세션 해석
-- cron 표현식 또는 절대 시간을 이용한 예약 작업
-- 여러 봇이 컨텍스트를 공유하는 그룹 채팅 지원
-- 멀티 에이전트 워크플로우를 위한 봇 간 메시징
-- 파일 업로드/다운로드, 도구 관리, 디버그 로깅
+**Setup:**
 
-**명령어:** `/start`, `/stop`, `/clear`, `/help`, `/session`, `/pwd`, `/model`, `/down`, `/instruction`, `/instruction_clear`, `/allowed`, `/allowedtools`, `/availabletools`, `/context`, `/query`, `/public`, `/direct`, `/setpollingtime`, `/debug`, `/silent`
+```bash
+cokacctl install                  # Download and install cokacdir binary
+cokacctl update                   # Update cokacdir to latest version
+```
 
-## 지원 플랫폼
+**Token Management:**
 
-- macOS (Apple Silicon & Intel)
-- Linux (x86_64 & ARM64)
-- Windows (x86_64 & ARM64)
+```bash
+cokacctl token <TOKEN>            # Register a Telegram bot token
+cokacctl token <TOKEN1> <TOKEN2>  # Register multiple bot tokens (space-separated)
+```
 
-## 라이선스
+Tokens are saved to `~/.cokacdir/config.json` and reused across start/restart. Registering new tokens overwrites previously saved ones. Get tokens from [@BotFather](https://t.me/BotFather) on Telegram (`/newbot`).
+
+**Service Management:**
+
+```bash
+cokacctl start                    # Start the background service
+cokacctl stop                     # Stop the service
+cokacctl restart                  # Restart with currently registered tokens
+cokacctl remove                   # Remove the service registration entirely
+```
+
+- `start` requires tokens to be registered first via `cokacctl token`.
+- `start` registers the service for auto-start on login/boot.
+- `restart` reuses the currently registered tokens.
+- `remove` stops the service and removes its registration. `start` will re-register from scratch.
+
+**Monitoring:**
+
+```bash
+cokacctl status                   # Show versions, service state, and token count
+cokacctl log                      # Tail service log in real time (Ctrl+C to stop)
+```
+
+**Typical workflow:**
+
+```bash
+cokacctl install                  # 1. Install cokacdir
+cokacctl token 123456:ABC-xyz     # 2. Register your Telegram bot token
+cokacctl start                    # 3. Start the service
+cokacctl status                   # 4. Verify it's running
+cokacctl log                      # 5. Watch the log
+```
+
+### How `update` Works
+
+`cokacctl update` checks for a newer version and updates the cokacdir binary in-place. If the service is currently running, it automatically stops the service before updating and restarts it afterward with the same tokens.
+
+## Supported Platforms
+
+| Platform | Architecture | Service Backend |
+|----------|-------------|-----------------|
+| macOS | Apple Silicon (aarch64) | launchd |
+| macOS | Intel (x86_64) | launchd |
+| Linux | x86_64 | systemd |
+| Linux | ARM64 (aarch64) | systemd |
+| Windows | x86_64 | Task Scheduler |
+| Windows | ARM64 (aarch64) | Task Scheduler |
+
+## File Locations
+
+| File | Path |
+|------|------|
+| Config | `~/.cokacdir/config.json` |
+| Service log | `~/.cokacdir/logs/cokacdir.log` (Windows) |
+| | `~/Library/Logs/cokacdir/cokacdir.log` (macOS) |
+| | `~/.local/state/cokacdir/cokacdir.log` (Linux) |
+| Error log | Same directory as service log, `cokacdir.error.log` |
+| Debug log | `~/.cokacdir/debug/cokacctl.log` |
+
+## Community
+
+[Telegram Group](https://t.me/cokacvibe)
+
+## License
 
 MIT License
 
-## 저자
+## Author
 
 cokac <monogatree@gmail.com>
 
-홈페이지: https://cokacdir.cokac.com
+## Disclaimer
 
-## 면책 조항
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
 
-이 소프트웨어는 상품성, 특정 목적에의 적합성 및 비침해성에 대한 보증을 포함하되 이에 국한되지 않는, 명시적이거나 묵시적인 어떠한 종류의 보증도 없이 "있는 그대로" 제공됩니다.
+IN NO EVENT SHALL THE AUTHORS, COPYRIGHT HOLDERS, OR CONTRIBUTORS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-어떠한 경우에도 저자, 저작권 보유자 또는 기여자는 이 소프트웨어 또는 이 소프트웨어의 사용과 관련하여 발생하는 계약, 불법행위 또는 기타 사유에 의한 청구, 손해 또는 기타 책임에 대해 책임을 지지 않습니다.
+This includes, without limitation:
 
-여기에는 다음이 포함되며 이에 국한되지 않습니다:
+- Data loss or corruption
+- System damage or malfunction
+- Security breaches or vulnerabilities
+- Financial losses
+- Any direct, indirect, incidental, special, exemplary, or consequential damages
 
-- 데이터 손실 또는 손상
-- 시스템 손상 또는 오작동
-- 보안 침해 또는 취약점
-- 금전적 손실
-- 직접적, 간접적, 부수적, 특별, 징벌적 또는 결과적 손해
+The user assumes full responsibility for all consequences arising from the use of this software, regardless of whether such use was intended, authorized, or anticipated.
 
-사용자는 해당 사용이 의도되었든, 승인되었든, 예상되었든 관계없이, 이 소프트웨어 사용으로 인해 발생하는 모든 결과에 대해 전적으로 책임을 집니다.
-
-**사용에 따른 모든 위험은 사용자에게 있습니다.**
+**USE AT YOUR OWN RISK.**
