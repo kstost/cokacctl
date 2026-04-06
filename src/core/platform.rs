@@ -184,7 +184,7 @@ impl ServicePaths {
                 let log_dir = home.join(".cokacdir").join("logs");
                 ServicePaths {
                     service_file: PathBuf::new(), // Task Scheduler has no file
-                    wrapper_script: PathBuf::new(),
+                    wrapper_script: home.join(".cokacdir").join("scripts").join("run.bat"),
                     log_dir: log_dir.clone(),
                     log_file: log_dir.join("cokacdir.log"),
                     error_log_file: log_dir.join("cokacdir.error.log"),

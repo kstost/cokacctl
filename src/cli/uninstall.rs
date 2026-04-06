@@ -189,6 +189,7 @@ fn collect_paths(home: &PathBuf, os: Os) -> (Vec<PathBuf>, Vec<PathBuf>) {
             ],
             vec![
                 home.join(".cokacdir/logs"),
+                home.join(".cokacdir/scripts"),
             ],
         ),
     }

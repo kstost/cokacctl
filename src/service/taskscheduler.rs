@@ -1,16 +1,43 @@
 use super::{ServiceManager, ServiceStatus};
 use crate::core::debug::decode_output;
+use crate::core::platform::ServicePaths;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const TASK_NAME: &str = "cokacdir";
 
-pub struct TaskSchedulerManager;
+pub struct TaskSchedulerManager {
+    paths: ServicePaths,
+}
 
 impl TaskSchedulerManager {
     pub fn new() -> Self {
         dlog!("taskscheduler", "TaskSchedulerManager created");
-        TaskSchedulerManager
+        TaskSchedulerManager {
+            paths: ServicePaths::for_current_os(),
+        }
+    }
+
+    fn escape_bat_arg(s: &str) -> String {
+        let escaped = s
+            .replace('^', "^^")
+            .replace('&', "^&")
+            .replace('|', "^|")
+            .replace('<', "^<")
+            .replace('>', "^>")
+            .replace('%', "%%");
+        format!("\"{}\"", escaped)
+    }
+
+    fn generate_wrapper(binary_path: &Path, tokens: &[String], paths: &ServicePaths) -> String {
+        let args: Vec<String> = tokens.iter().map(|t| Self::escape_bat_arg(t)).collect();
+        format!(
+            "@echo off\r\n{exe} --ccserver -- {args} >> \"{log}\" 2>> \"{elog}\"\r\n",
+            exe = Self::escape_bat_arg(&binary_path.to_string_lossy()),
+            args = args.join(" "),
+            log = paths.log_file.to_string_lossy(),
+            elog = paths.error_log_file.to_string_lossy(),
+        )
     }
 
     /// Create a Command with CREATE_NO_WINDOW flag on Windows
@@ -43,36 +70,40 @@ impl ServiceManager for TaskSchedulerManager {
         dlog!("taskscheduler", "tokens count: {}", tokens.len());
 
         // Remove existing task first
-        dlog!("taskscheduler", "[step 1/3] Removing existing task...");
+        dlog!("taskscheduler", "[step 1/4] Removing existing task...");
         let remove_result = self.remove();
         dlog!("taskscheduler", "remove result: {:?}", remove_result);
 
         // Prepare log directory
         let home = dirs::home_dir()
             .ok_or("Cannot determine home directory")?;
-        let cokacdir_dir = home.join(".cokacdir");
-        let log_dir = cokacdir_dir.join("logs");
-        let _ = std::fs::create_dir_all(&log_dir);
-        let error_log_path = log_dir.join("cokacdir.error.log");
+        let _ = std::fs::create_dir_all(&self.paths.log_dir);
+        if let Some(script_dir) = self.paths.wrapper_script.parent() {
+            let _ = std::fs::create_dir_all(script_dir);
+        }
 
         // Truncate error log so we only capture fresh errors
-        let _ = std::fs::File::create(&error_log_path);
+        let _ = std::fs::File::create(&self.paths.error_log_file);
 
-        // Register scheduled task with cokacdir.exe directly
+        // Generate wrapper script that redirects stdout/stderr to log files
+        dlog!("taskscheduler", "[step 2/4] Writing wrapper script...");
+        let wrapper = Self::generate_wrapper(binary_path, tokens, &self.paths);
+        dlog!("taskscheduler", "Wrapper path: {}", self.paths.wrapper_script.display());
+        std::fs::write(&self.paths.wrapper_script, &wrapper)
+            .map_err(|e| format!("Cannot write wrapper script: {}", e))?;
+
+        // Register scheduled task to run the wrapper script
         let escape_ps_single = |s: &str| -> String {
             s.replace('\'', "''")
         };
-        let token_args = tokens.join(" ");
-        let argument = format!("--ccserver -- {}", token_args);
 
-        dlog!("taskscheduler", "[step 2/3] Registering scheduled task...");
+        dlog!("taskscheduler", "[step 3/4] Registering scheduled task...");
         let script = format!(
-            "$action = New-ScheduledTaskAction -Execute '{exe}' -Argument '{args}' -WorkingDirectory '{wd}'\n\
+            "$action = New-ScheduledTaskAction -Execute '{exe}' -WorkingDirectory '{wd}'\n\
              $trigger = New-ScheduledTaskTrigger -AtLogon\n\
              $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Highest\n\
              Register-ScheduledTask -TaskName '{name}' -Action $action -Trigger $trigger -Principal $principal -Force",
-            exe = escape_ps_single(&binary_path.to_string_lossy()),
-            args = escape_ps_single(&argument),
+            exe = escape_ps_single(&self.paths.wrapper_script.to_string_lossy()),
             wd = escape_ps_single(&home.to_string_lossy()),
             name = TASK_NAME,
         );
@@ -94,7 +125,7 @@ impl ServiceManager for TaskSchedulerManager {
         }
 
         // Start the scheduled task immediately
-        dlog!("taskscheduler", "[step 3/3] Starting scheduled task...");
+        dlog!("taskscheduler", "[step 4/4] Starting scheduled task...");
         let start_output = Self::powershell(&format!(
             "Start-ScheduledTask -TaskName '{}'", TASK_NAME
         ))?;
@@ -116,7 +147,7 @@ impl ServiceManager for TaskSchedulerManager {
             Ok(tl_output) => {
                 let tl_stdout = decode_output(&tl_output.stdout);
                 if !tl_stdout.contains("cokacdir.exe") {
-                    let err_output = std::fs::read_to_string(&error_log_path).unwrap_or_default();
+                    let err_output = std::fs::read_to_string(&self.paths.error_log_file).unwrap_or_default();
                     dlog!("taskscheduler", "Process not found after start: '{}'", err_output.trim());
                     return Err(format!("cokacdir exited immediately: {}", err_output.trim()));
                 }
@@ -174,6 +205,10 @@ impl ServiceManager for TaskSchedulerManager {
             dlog!("taskscheduler", "schtasks /Delete exit: {}, stdout: '{}', stderr: '{}'",
                 out.status, stdout.trim(), stderr.trim());
         }
+        if self.paths.wrapper_script.exists() {
+            dlog!("taskscheduler", "Removing wrapper: {}", self.paths.wrapper_script.display());
+            std::fs::remove_file(&self.paths.wrapper_script).ok();
+        }
         dlog!("taskscheduler", "remove() done");
 
         Ok(())
@@ -225,9 +260,7 @@ impl ServiceManager for TaskSchedulerManager {
     }
 
     fn log_path(&self) -> Option<PathBuf> {
-        let home = dirs::home_dir()?;
-        let path = home.join(".cokacdir").join("logs").join("cokacdir.log");
-        dlog!("taskscheduler", "log_path: {}", path.display());
-        Some(path)
+        dlog!("taskscheduler", "log_path: {}", self.paths.log_file.display());
+        Some(self.paths.log_file.clone())
     }
 }
