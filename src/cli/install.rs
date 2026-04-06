@@ -46,7 +46,7 @@ async fn run_inner(tx: &Option<ProgressTx>) -> Result<(), String> {
     // Stop service if running (binary may be locked, especially on Windows)
     dlog!("install", "Checking service status...");
     let mgr = crate::service::manager();
-    let was_running = mgr.status() == crate::service::ServiceStatus::Running;
+    let was_running = mgr.status() == crate::service::ServiceStatus::Running || mgr.is_any_running();
     dlog!("install", "Service was_running: {}", was_running);
     if was_running {
         send(tx, "  Stopping running service...".into());

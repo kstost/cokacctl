@@ -141,9 +141,7 @@ impl ServiceManager for SystemdManager {
         }
 
         dlog!("systemd", "Stopping existing service...");
-        let _ = Command::new("systemctl")
-            .args(["--user", "stop", SERVICE_NAME])
-            .output();
+        let _ = self.stop();
 
         let service = self.generate_service();
         dlog!("systemd", "Writing service file to: {}", self.paths.service_file.display());
@@ -221,28 +219,50 @@ impl ServiceManager for SystemdManager {
 
     fn stop(&self) -> Result<(), String> {
         dlog!("systemd", "stop() called");
-        let r = Command::new("systemctl")
+        let mut service_err: Option<String> = None;
+        match Command::new("systemctl")
             .args(["--user", "stop", SERVICE_NAME])
             .output()
-            .map_err(|e| format!("stop failed: {}", e))?;
-        if !r.status.success() {
-            let stderr = String::from_utf8_lossy(&r.stderr);
-            if !stderr.contains("not loaded") && !stderr.contains("not found") {
-                dlog!("systemd", "stop() failed: {}", stderr);
-                return Err(format!("systemctl stop failed: {}", stderr));
+        {
+            Ok(r) => {
+                if !r.status.success() {
+                    let stderr = String::from_utf8_lossy(&r.stderr);
+                    if !stderr.contains("not loaded") && !stderr.contains("not found") {
+                        dlog!("systemd", "stop() failed: {}", stderr);
+                        service_err = Some(format!("systemctl stop failed: {}", stderr));
+                    } else {
+                        dlog!("systemd", "stop(): service was not loaded");
+                    }
+                } else {
+                    dlog!("systemd", "stop() success");
+                }
             }
-            dlog!("systemd", "stop(): service was not loaded");
-        } else {
-            dlog!("systemd", "stop() success");
+            Err(e) => {
+                dlog!("systemd", "stop(): systemctl exec failed: {}", e);
+                service_err = Some(format!("stop failed: {}", e));
+            }
+        }
+
+        // Always kill externally running cokacdir processes regardless of service stop result
+        dlog!("systemd", "stop(): killing external cokacdir processes via pkill...");
+        match Command::new("pkill").arg("cokacdir").output() {
+            Ok(out) => {
+                dlog!("systemd", "stop(): pkill exit={} (0=killed, 1=none found)", out.status.code().unwrap_or(-1));
+            }
+            Err(e) => {
+                dlog!("systemd", "stop(): pkill failed: {}", e);
+            }
+        }
+
+        if let Some(err) = service_err {
+            return Err(err);
         }
         Ok(())
     }
 
     fn remove(&self) -> Result<(), String> {
         dlog!("systemd", "remove() called");
-        let _ = Command::new("systemctl")
-            .args(["--user", "stop", SERVICE_NAME])
-            .output();
+        let _ = self.stop();
         let _ = Command::new("systemctl")
             .args(["--user", "disable", SERVICE_NAME])
             .output();
@@ -284,6 +304,23 @@ impl ServiceManager for SystemdManager {
             Err(e) => {
                 dlog!("systemd", "status() query failed: {}", e);
                 ServiceStatus::Unknown("Cannot query systemctl".into())
+            }
+        }
+    }
+
+    fn is_any_running(&self) -> bool {
+        dlog!("systemd", "is_any_running(): checking pgrep cokacdir...");
+        match Command::new("pgrep").arg("cokacdir").output() {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let pids = stdout.trim();
+                let found = output.status.success();
+                dlog!("systemd", "is_any_running(): pgrep exit={}, pids='{}', found={}", output.status.code().unwrap_or(-1), pids, found);
+                found
+            }
+            Err(e) => {
+                dlog!("systemd", "is_any_running(): pgrep failed: {}", e);
+                false
             }
         }
     }

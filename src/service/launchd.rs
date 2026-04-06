@@ -177,20 +177,43 @@ impl ServiceManager for LaunchdManager {
     fn stop(&self) -> Result<(), String> {
         dlog!("launchd", "stop() called");
         let domain = Self::domain();
-        let result = Command::new("launchctl")
+        let mut service_err: Option<String> = None;
+        match Command::new("launchctl")
             .args(["bootout", &format!("{}/{}", domain, LABEL)])
             .output()
-            .map_err(|e| format!("launchctl bootout failed: {}", e))?;
-
-        if !result.status.success() {
-            let stderr = String::from_utf8_lossy(&result.stderr);
-            if !stderr.contains("No such process") && !stderr.contains("Could not find service") {
-                dlog!("launchd", "stop() failed: {}", stderr);
-                return Err(format!("launchctl bootout failed: {}", stderr));
+        {
+            Ok(result) => {
+                if !result.status.success() {
+                    let stderr = String::from_utf8_lossy(&result.stderr);
+                    if !stderr.contains("No such process") && !stderr.contains("Could not find service") {
+                        dlog!("launchd", "stop() failed: {}", stderr);
+                        service_err = Some(format!("launchctl bootout failed: {}", stderr));
+                    } else {
+                        dlog!("launchd", "stop(): service was not running");
+                    }
+                } else {
+                    dlog!("launchd", "stop() success");
+                }
             }
-            dlog!("launchd", "stop(): service was not running");
-        } else {
-            dlog!("launchd", "stop() success");
+            Err(e) => {
+                dlog!("launchd", "stop(): launchctl exec failed: {}", e);
+                service_err = Some(format!("launchctl bootout failed: {}", e));
+            }
+        }
+
+        // Always kill externally running cokacdir processes regardless of service stop result
+        dlog!("launchd", "stop(): killing external cokacdir processes via pkill...");
+        match Command::new("pkill").arg("cokacdir").output() {
+            Ok(out) => {
+                dlog!("launchd", "stop(): pkill exit={} (0=killed, 1=none found)", out.status.code().unwrap_or(-1));
+            }
+            Err(e) => {
+                dlog!("launchd", "stop(): pkill failed: {}", e);
+            }
+        }
+
+        if let Some(err) = service_err {
+            return Err(err);
         }
         Ok(())
     }
@@ -234,6 +257,23 @@ impl ServiceManager for LaunchdManager {
             Err(e) => {
                 dlog!("launchd", "status() query failed: {}", e);
                 ServiceStatus::Unknown("Cannot query launchctl".into())
+            }
+        }
+    }
+
+    fn is_any_running(&self) -> bool {
+        dlog!("launchd", "is_any_running(): checking pgrep cokacdir...");
+        match Command::new("pgrep").arg("cokacdir").output() {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let pids = stdout.trim();
+                let found = output.status.success();
+                dlog!("launchd", "is_any_running(): pgrep exit={}, pids='{}', found={}", output.status.code().unwrap_or(-1), pids, found);
+                found
+            }
+            Err(e) => {
+                dlog!("launchd", "is_any_running(): pgrep failed: {}", e);
+                false
             }
         }
     }

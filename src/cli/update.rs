@@ -60,7 +60,7 @@ async fn run_inner(tx: &Option<ProgressTx>) -> Result<(), String> {
     send(tx, format!("  Updating v{} → v{}...", current, latest));
 
     let mgr = crate::service::manager();
-    let was_running = mgr.status() == crate::service::ServiceStatus::Running;
+    let was_running = mgr.status() == crate::service::ServiceStatus::Running || mgr.is_any_running();
     dlog!("update", "Service was_running: {}", was_running);
     if was_running {
         send(tx, "  Stopping service for update...".into());

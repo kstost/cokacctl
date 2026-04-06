@@ -73,6 +73,17 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
                         println!("    launchctl bootout: skipped (not running)");
                     }
                 }
+
+                // Kill any externally running cokacdir processes
+                dlog!("uninstall", "Killing all cokacdir processes via pkill...");
+                match Command::new("pkill").arg("cokacdir").output() {
+                    Ok(out) => {
+                        dlog!("uninstall", "pkill cokacdir exit={}", out.status.code().unwrap_or(-1));
+                    }
+                    Err(e) => {
+                        dlog!("uninstall", "pkill cokacdir failed: {}", e);
+                    }
+                }
             }
         }
         Os::Linux => {
@@ -88,6 +99,16 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
                 _ => println!("    systemctl disable: skipped (not enabled)"),
             }
 
+            // Kill any externally running cokacdir processes
+            dlog!("uninstall", "Killing all cokacdir processes via pkill...");
+            match Command::new("pkill").arg("cokacdir").output() {
+                Ok(out) => {
+                    dlog!("uninstall", "pkill cokacdir exit={}", out.status.code().unwrap_or(-1));
+                }
+                Err(e) => {
+                    dlog!("uninstall", "pkill cokacdir failed: {}", e);
+                }
+            }
         }
         Os::Windows => {
             #[cfg(windows)]
@@ -101,11 +122,21 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
                     _ => println!("    schtasks delete: skipped (not registered)"),
                 }
 
-                // Kill running process
-                let mut kill = Command::new("taskkill");
-                kill.args(["/IM", "cokacdir.exe", "/F"]);
-                kill.creation_flags(0x08000000);
-                let _ = kill.output();
+                // Kill all cokacdir* processes
+                dlog!("uninstall", "Killing all cokacdir* processes via PowerShell...");
+                let mut ps = Command::new("powershell");
+                ps.args(["-NoProfile", "-NonInteractive", "-Command",
+                    "Get-Process | Where-Object { $_.ProcessName -like 'cokacdir*' } | ForEach-Object { Write-Output \"Killing PID=$($_.Id) Name=$($_.ProcessName)\"; Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }"]);
+                ps.creation_flags(0x08000000);
+                match ps.output() {
+                    Ok(out) => {
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        dlog!("uninstall", "kill cokacdir* exit={}, stdout='{}'", out.status, stdout.trim());
+                    }
+                    Err(e) => {
+                        dlog!("uninstall", "kill cokacdir* failed: {}", e);
+                    }
+                }
             }
             #[cfg(not(windows))]
             {

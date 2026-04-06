@@ -40,6 +40,8 @@ pub trait ServiceManager {
     fn remove(&self) -> Result<(), String>;
     /// Get current service status.
     fn status(&self) -> ServiceStatus;
+    /// Check if any cokacdir process is running externally (regardless of service manager).
+    fn is_any_running(&self) -> bool;
     /// Get log file path.
     fn log_path(&self) -> Option<std::path::PathBuf>;
 }

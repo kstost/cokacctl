@@ -60,6 +60,95 @@ impl TaskSchedulerManager {
             .map_err(|e| format!("PowerShell execution failed: {}", e))
     }
 
+    fn is_cokacdir_running() -> bool {
+        dlog!("taskscheduler", "is_cokacdir_running: checking tasklist...");
+        match Self::cmd("tasklist").args(["/FO", "CSV", "/NH"]).output() {
+            Ok(output) => {
+                let stdout = decode_output(&output.stdout);
+                let matching: Vec<&str> = stdout.lines().filter(|line| {
+                    line.to_lowercase().starts_with("\"cokacdir")
+                }).collect();
+                let found = !matching.is_empty();
+                if found {
+                    for m in &matching {
+                        dlog!("taskscheduler", "is_cokacdir_running: matched process: {}", m);
+                    }
+                }
+                dlog!("taskscheduler", "is_cokacdir_running: result={} (matched {} processes)", found, matching.len());
+                found
+            }
+            Err(e) => {
+                dlog!("taskscheduler", "is_cokacdir_running: tasklist failed: {}", e);
+                false
+            }
+        }
+    }
+
+    fn pid_file_path(&self) -> PathBuf {
+        self.paths.log_dir.join("cokacdir.pid")
+    }
+
+    fn save_pid(&self) {
+        dlog!("taskscheduler", "save_pid: scanning tasklist for cokacdir PID...");
+        if let Ok(output) = Self::cmd("tasklist").args(["/FO", "CSV", "/NH"]).output() {
+            let stdout = decode_output(&output.stdout);
+            for line in stdout.lines() {
+                if line.to_lowercase().starts_with("\"cokacdir") {
+                    if let Some(pid_field) = line.split(',').nth(1) {
+                        let pid = pid_field.trim().trim_matches('"');
+                        let path = self.pid_file_path();
+                        dlog!("taskscheduler", "save_pid: writing PID={} to {}", pid, path.display());
+                        let _ = std::fs::write(&path, pid);
+                        return;
+                    }
+                }
+            }
+        }
+        dlog!("taskscheduler", "save_pid: no cokacdir process found to save");
+    }
+
+    fn clear_pid(&self) {
+        let path = self.pid_file_path();
+        if path.exists() {
+            dlog!("taskscheduler", "clear_pid: removing {}", path.display());
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    fn is_saved_pid_alive(&self) -> bool {
+        let path = self.pid_file_path();
+        let pid = match std::fs::read_to_string(&path) {
+            Ok(s) => s.trim().to_string(),
+            Err(_) => {
+                dlog!("taskscheduler", "is_saved_pid_alive: no PID file");
+                return false;
+            }
+        };
+        if pid.is_empty() {
+            return false;
+        }
+        dlog!("taskscheduler", "is_saved_pid_alive: checking PID={}", pid);
+        match Self::cmd("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid), "/FO", "CSV", "/NH"])
+            .output()
+        {
+            Ok(output) => {
+                let stdout = decode_output(&output.stdout);
+                let alive = stdout.to_lowercase().contains("cokacdir");
+                dlog!("taskscheduler", "is_saved_pid_alive: PID={} alive={} (tasklist: '{}')", pid, alive, stdout.trim());
+                if !alive {
+                    dlog!("taskscheduler", "is_saved_pid_alive: PID dead, clearing PID file");
+                    let _ = std::fs::remove_file(&path);
+                }
+                alive
+            }
+            Err(e) => {
+                dlog!("taskscheduler", "is_saved_pid_alive: tasklist failed: {}", e);
+                false
+            }
+        }
+    }
+
 }
 
 impl ServiceManager for TaskSchedulerManager {
@@ -140,23 +229,15 @@ impl ServiceManager for TaskSchedulerManager {
 
         // Wait briefly and verify process is running
         std::thread::sleep(std::time::Duration::from_millis(2000));
-        match Self::cmd("tasklist")
-            .args(["/FI", "IMAGENAME eq cokacdir.exe", "/FO", "CSV", "/NH"])
-            .output()
-        {
-            Ok(tl_output) => {
-                let tl_stdout = decode_output(&tl_output.stdout);
-                if !tl_stdout.contains("cokacdir.exe") {
-                    let err_output = std::fs::read_to_string(&self.paths.error_log_file).unwrap_or_default();
-                    dlog!("taskscheduler", "Process not found after start: '{}'", err_output.trim());
-                    return Err(format!("cokacdir exited immediately: {}", err_output.trim()));
-                }
-                dlog!("taskscheduler", "Process running after 2s - OK");
-            }
-            Err(e) => {
-                dlog!("taskscheduler", "tasklist check failed: {}", e);
-            }
+        if !Self::is_cokacdir_running() {
+            let err_output = std::fs::read_to_string(&self.paths.error_log_file).unwrap_or_default();
+            dlog!("taskscheduler", "Process not found after start: '{}'", err_output.trim());
+            return Err(format!("cokacdir exited immediately: {}", err_output.trim()));
         }
+        dlog!("taskscheduler", "Process running after 2s - OK");
+
+        // Save managed process PID for status tracking
+        self.save_pid();
 
         dlog!("taskscheduler", "========== start() SUCCESS ==========");
         Ok(())
@@ -174,16 +255,25 @@ impl ServiceManager for TaskSchedulerManager {
             dlog!("taskscheduler", "Stop-ScheduledTask exit: {}, stderr: '{}'", out.status, stderr.trim());
         }
 
-        // Also kill any running cokacdir process
-        let kill_result = Self::cmd("taskkill")
-            .args(["/IM", "cokacdir.exe", "/F"])
-            .output();
-        if let Ok(ref out) = kill_result {
-            let stdout = decode_output(&out.stdout);
-            let stderr = decode_output(&out.stderr);
-            dlog!("taskscheduler", "taskkill exit: {}, stdout: '{}', stderr: '{}'",
-                out.status, stdout.trim(), stderr.trim());
+        // Kill all cokacdir* processes
+        dlog!("taskscheduler", "stop(): killing all cokacdir* processes via PowerShell...");
+        let kill_result = Self::powershell(
+            "Get-Process | Where-Object { $_.ProcessName -like 'cokacdir*' } | ForEach-Object { Write-Output \"Killing PID=$($_.Id) Name=$($_.ProcessName)\"; Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }"
+        );
+        match kill_result {
+            Ok(ref out) => {
+                let stdout = decode_output(&out.stdout);
+                let stderr = decode_output(&out.stderr);
+                dlog!("taskscheduler", "stop(): kill result exit={}, stdout='{}', stderr='{}'",
+                    out.status, stdout.trim(), stderr.trim());
+            }
+            Err(ref e) => {
+                dlog!("taskscheduler", "stop(): kill powershell failed: {}", e);
+            }
         }
+        // Clear PID file
+        self.clear_pid();
+
         dlog!("taskscheduler", "stop() done");
 
         Ok(())
@@ -217,46 +307,44 @@ impl ServiceManager for TaskSchedulerManager {
     fn status(&self) -> ServiceStatus {
         dlog!("taskscheduler", "status() called");
 
-        // Check if cokacdir.exe process is actually running
-        match Self::cmd("tasklist")
-            .args(["/FI", "IMAGENAME eq cokacdir.exe", "/FO", "CSV", "/NH"])
-            .output()
-        {
-            Ok(output) => {
-                let stdout = decode_output(&output.stdout);
-                let line = stdout.trim();
-                dlog!("taskscheduler", "status() tasklist: '{}'", line);
-                if line.contains("cokacdir.exe") {
-                    dlog!("taskscheduler", "status(): Running");
-                    return ServiceStatus::Running;
-                }
-            }
-            Err(e) => {
-                dlog!("taskscheduler", "status() tasklist failed: {}", e);
-            }
-        }
-
-        // Check if the scheduled task exists
+        // Check if the scheduled task is registered
         match Self::cmd("schtasks")
             .args(["/Query", "/TN", TASK_NAME, "/FO", "CSV", "/NH"])
             .output()
         {
             Ok(output) => {
-                let stdout = decode_output(&output.stdout);
-                let stderr = decode_output(&output.stderr);
                 if !output.status.success() {
+                    let stderr = decode_output(&output.stderr);
                     dlog!("taskscheduler", "status(): NotInstalled (stderr: '{}')", stderr.trim());
-                    ServiceStatus::NotInstalled
-                } else {
-                    dlog!("taskscheduler", "status(): Stopped (stdout: '{}')", stdout.trim());
-                    ServiceStatus::Stopped
+                    return ServiceStatus::NotInstalled;
                 }
             }
             Err(e) => {
                 dlog!("taskscheduler", "status() schtasks failed: {}", e);
-                ServiceStatus::Unknown("Cannot query Task Scheduler".into())
+                return ServiceStatus::Unknown("Cannot query Task Scheduler".into());
             }
         }
+
+        // Task exists — check if the managed process (saved PID) is alive
+        if self.is_saved_pid_alive() {
+            dlog!("taskscheduler", "status(): Running (PID alive)");
+            return ServiceStatus::Running;
+        }
+
+        // Fallback: PID file missing or stale — check if any cokacdir process is running
+        // (handles upgrade from older version without PID tracking, or manual PID file deletion)
+        if Self::is_cokacdir_running() {
+            dlog!("taskscheduler", "status(): Running (fallback: process found without PID file)");
+            self.save_pid();
+            return ServiceStatus::Running;
+        }
+
+        dlog!("taskscheduler", "status(): Stopped");
+        ServiceStatus::Stopped
+    }
+
+    fn is_any_running(&self) -> bool {
+        Self::is_cokacdir_running()
     }
 
     fn log_path(&self) -> Option<PathBuf> {

@@ -296,10 +296,15 @@ fn action_start(app: &mut App) {
     let (tx, rx) = std::sync::mpsc::channel();
     let tokens = config.tokens.clone();
     std::thread::spawn(move || {
-        dlog!("event::action_start", "Thread: calling mgr.start()");
         let mgr = service::manager();
+        if mgr.is_any_running() {
+            dlog!("event::action_start", "Thread: cokacdir process found, stopping all first...");
+            let stop_result = mgr.stop();
+            dlog!("event::action_start", "Thread: stop result = {:?}", stop_result);
+        }
+        dlog!("event::action_start", "Thread: calling mgr.start()");
         let result = mgr.start(&binary_path, &tokens);
-        dlog!("event::action_start", "Thread: result = {:?}", result);
+        dlog!("event::action_start", "Thread: start result = {:?}", result);
         tx.send(result).ok();
     });
     app.service_action_rx = Some(rx);
