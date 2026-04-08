@@ -88,9 +88,7 @@ pub fn default_install_path(os: Os) -> PathBuf {
 /// Fallback installation path when default is not writable.
 pub fn fallback_install_path() -> PathBuf {
     let home = dirs::home_dir().expect("Cannot determine home directory");
-    let dir = home.join(".local").join("bin");
-    std::fs::create_dir_all(&dir).ok();
-    let path = dir.join("cokacdir");
+    let path = home.join(".local").join("bin").join("cokacdir");
     dlog!("platform", "Fallback install path: {}", path.display());
     path
 }
@@ -98,6 +96,18 @@ pub fn fallback_install_path() -> PathBuf {
 /// Find cokacdir binary in PATH or default install location.
 pub fn find_cokacdir() -> Option<PathBuf> {
     dlog!("platform", "Searching for cokacdir...");
+
+    // Check user-configured path first
+    let config = crate::core::config::Config::load();
+    if let Some(ref custom) = config.install_path {
+        let path = PathBuf::from(custom);
+        if path.is_file() {
+            dlog!("platform", "Found cokacdir at configured path: {}", path.display());
+            return Some(path);
+        }
+        dlog!("platform", "Configured path '{}' not valid, falling back", custom);
+    }
+
     if let Some(p) = which("cokacdir") {
         dlog!("platform", "Found cokacdir in PATH: {}", p.display());
         return Some(p);
@@ -194,6 +204,57 @@ impl ServicePaths {
         dlog!("platform", "Service paths - log_file: {}", paths.log_file.display());
         paths
     }
+
+    /// Read the wrapper script and count how many tokens were passed when the service last started.
+    pub fn running_token_count(&self) -> Option<usize> {
+        dlog!("platform::rtc", "wrapper_script path: '{}'", self.wrapper_script.display());
+        dlog!("platform::rtc", "wrapper_script exists: {}", self.wrapper_script.exists());
+
+        let content = match std::fs::read_to_string(&self.wrapper_script) {
+            Ok(c) => {
+                dlog!("platform::rtc", "read success: {} bytes, {} lines", c.len(), c.lines().count());
+                c
+            }
+            Err(e) => {
+                dlog!("platform::rtc", "read FAILED: {}", e);
+                return None;
+            }
+        };
+
+        for (i, line) in content.lines().enumerate() {
+            dlog!("platform::rtc", "line[{}]: {:?}", i, line);
+            if let Some((_, rest)) = line.split_once("--ccserver -- ") {
+                let count = count_quoted_args(rest);
+                dlog!("platform::rtc", "  -> found marker, rest={:?}, count={}", rest, count);
+                return Some(count);
+            }
+        }
+
+        dlog!("platform::rtc", "marker '--ccserver -- ' not found in any line");
+        None
+    }
+}
+
+/// Count shell/bat quoted arguments, stopping at unquoted `>` (redirect).
+fn count_quoted_args(s: &str) -> usize {
+    let mut count = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_word = false;
+    for c in s.chars() {
+        match c {
+            '\'' if !in_double => { in_single = !in_single; in_word = true; }
+            '"' if !in_single => { in_double = !in_double; in_word = true; }
+            ' ' | '\t' if !in_single && !in_double => {
+                if in_word { count += 1; in_word = false; }
+            }
+            '>' if !in_single && !in_double => break,
+            _ if !in_single && !in_double => { in_word = true; }
+            _ => {}
+        }
+    }
+    if in_word { count += 1; }
+    count
 }
 
 /// Get shell config file path.

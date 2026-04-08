@@ -8,6 +8,7 @@ use crate::service::{self, ServiceStatus};
 pub enum View {
     Welcome,
     TokenInput,
+    BinaryPathInput,
     Progress,
     Dashboard,
     LogFullscreen,
@@ -40,11 +41,15 @@ pub struct App {
     pub checking_update: bool,
     pub token_input: String,
     pub token_list: Vec<String>,
+    pub token_disabled: Vec<bool>,
     pub token_cursor: Option<usize>,
+    pub running_token_count: Option<usize>,
     pub service_busy: bool,
     pub service_busy_label: String,
     pub service_busy_tick: usize,
     pub service_action_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    // Binary path input state
+    pub binary_path_input: String,
     // Progress view state
     pub progress_action: Option<ProgressAction>,
     pub progress_lines: Vec<String>,
@@ -70,8 +75,13 @@ impl App {
         dlog!("app", "Querying initial service status...");
         let service_status = service::manager().status();
         dlog!("app", "Service status: {:?}", service_status);
+        let running_token_count = if service_status == ServiceStatus::Running {
+            platform::ServicePaths::for_current_os().running_token_count()
+        } else {
+            None
+        };
 
-        let initial_view = if cokacdir_version.is_some() {
+        let initial_view = if cokacdir_path.is_some() {
             View::Dashboard
         } else {
             View::Welcome
@@ -85,6 +95,7 @@ impl App {
             latest_version: None,
             cokacdir_path: cokacdir_path.map(|p| p.to_string_lossy().to_string()),
             service_status,
+            running_token_count,
             config,
             log_lines: Vec::new(),
             log_scroll_offset: 0,
@@ -92,6 +103,7 @@ impl App {
             checking_update: true,
             token_input: String::new(),
             token_list: Vec::new(),
+            token_disabled: Vec::new(),
             token_cursor: None,
             progress_action: None,
             progress_lines: Vec::new(),
@@ -101,6 +113,7 @@ impl App {
             service_busy_label: String::new(),
             service_busy_tick: 0,
             service_action_rx: None,
+            binary_path_input: String::new(),
         }
     }
 
@@ -109,6 +122,19 @@ impl App {
         self.service_status = service::manager().status();
         dlog!("app", "Service status: {:?}", self.service_status);
         self.config = Config::load();
+        dlog!("app", "Config loaded: total={} active={} disabled={}",
+            self.config.tokens.len(),
+            self.config.active_tokens().len(),
+            self.config.disabled_tokens.len());
+        self.running_token_count = if self.service_status == ServiceStatus::Running {
+            let rtc = platform::ServicePaths::for_current_os().running_token_count();
+            dlog!("app", "running_token_count result: {:?}", rtc);
+            rtc
+        } else {
+            dlog!("app", "running_token_count: None (not Running)");
+            None
+        };
+        dlog!("app", "final token_count() = {}", self.token_count());
     }
 
     pub fn refresh_cokacdir_info(&mut self) {
@@ -149,13 +175,26 @@ impl App {
     }
 
     pub fn token_count(&self) -> usize {
-        self.config.tokens.len()
+        if self.service_status == ServiceStatus::Running {
+            self.running_token_count.unwrap_or(self.config.active_tokens().len())
+        } else {
+            self.config.active_tokens().len()
+        }
+    }
+
+    pub fn enter_binary_path_input(&mut self) {
+        dlog!("app", "enter_binary_path_input()");
+        self.binary_path_input = self.config.install_path.clone().unwrap_or_default();
+        self.view = View::BinaryPathInput;
     }
 
     pub fn enter_token_input(&mut self) {
         dlog!("app", "enter_token_input()");
         self.token_input.clear();
         self.token_list = self.config.tokens.clone();
+        self.token_disabled = self.config.tokens.iter()
+            .map(|t| self.config.disabled_tokens.contains(t))
+            .collect();
         self.token_cursor = None;
         self.view = View::TokenInput;
     }

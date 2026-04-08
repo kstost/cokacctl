@@ -8,12 +8,23 @@ pub struct Config {
     /// Telegram bot tokens.
     #[serde(default)]
     pub tokens: Vec<String>,
+    /// Disabled token values (subset of tokens).
+    #[serde(default)]
+    pub disabled_tokens: Vec<String>,
     /// Path to the cokacdir binary (if custom).
     #[serde(default)]
     pub install_path: Option<String>,
 }
 
 impl Config {
+    /// Returns only the tokens that are not disabled.
+    pub fn active_tokens(&self) -> Vec<String> {
+        self.tokens.iter()
+            .filter(|t| !self.disabled_tokens.contains(t))
+            .cloned()
+            .collect()
+    }
+
     /// Config file path: ~/.cokacdir/cokacctl.json
     pub fn path() -> PathBuf {
         let home = dirs::home_dir().expect("Cannot determine home directory");

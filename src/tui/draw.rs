@@ -31,6 +31,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     match app.view {
         View::Welcome => draw_welcome(f, app),
         View::TokenInput => draw_token_input(f, app),
+        View::BinaryPathInput => draw_binary_path_input(f, app),
         View::Progress => draw_progress(f, app),
         View::Dashboard => draw_dashboard(f, app),
         View::LogFullscreen => draw_log_fullscreen(f, app),
@@ -71,18 +72,19 @@ fn draw_version_panel(f: &mut Frame, app: &App, area: Rect) {
     let mut lines = Vec::new();
 
     // cokacdir version
-    let version_str = app.cokacdir_version.as_deref().unwrap_or("not installed");
-    let (ver_style, status_icon) = if app.cokacdir_version.is_some() {
-        (Style::default().fg(GREEN), "  ")
+    let (ver_style, status_icon, version_str) = if let Some(ver) = app.cokacdir_version.as_deref() {
+        (Style::default().fg(GREEN), "  ", format!("v{}", ver))
+    } else if app.cokacdir_path.is_some() {
+        (Style::default().fg(YELLOW), "  ", "unknown version".to_string())
     } else {
-        (Style::default().fg(RED), "  ")
+        (Style::default().fg(RED), "  ", "not installed".to_string())
     };
     let path_str = app.cokacdir_path.as_deref().unwrap_or("");
 
     lines.push(Line::from(vec![
         Span::styled("cokacdir ", Style::default().fg(LABEL)),
         Span::styled(status_icon, ver_style),
-        Span::styled(if app.cokacdir_version.is_some() { format!("v{}", version_str) } else { version_str.to_string() }, ver_style),
+        Span::styled(version_str, ver_style),
         Span::styled(format!("  {}", path_str), Style::default().fg(DIM)),
     ]));
 
@@ -248,7 +250,9 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(" I ", Style::default().fg(Color::Black).bg(ACCENT)),
             Span::styled("nstall  ", Style::default().fg(DIM)),
             Span::styled(" U ", Style::default().fg(Color::Black).bg(ACCENT)),
-            Span::styled("pdate", Style::default().fg(DIM)),
+            Span::styled("pdate  ", Style::default().fg(DIM)),
+            Span::styled(" P ", Style::default().fg(Color::Black).bg(ACCENT)),
+            Span::styled("ath", Style::default().fg(DIM)),
         ])
     };
     let bar = Paragraph::new(line);
@@ -342,7 +346,7 @@ fn draw_welcome(f: &mut Frame, _app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let content_height: u16 = 7;
+    let content_height: u16 = 9;
     let pad_top = if inner.height > content_height {
         (inner.height - content_height) / 2
     } else {
@@ -378,11 +382,16 @@ fn draw_welcome(f: &mut Frame, _app: &App) {
     lines.push(Line::from(""));
     lines.push(
         Line::from(vec![
+            Span::styled(" P ", Style::default().fg(Color::Black).bg(ACCENT)),
+            Span::styled(" Set binary path", Style::default().fg(DIM)),
+            Span::styled("   ", Style::default()),
             Span::styled(" Q ", Style::default().fg(DIM).bg(SUBTLE)),
             Span::styled(" Quit", Style::default().fg(DIM)),
         ])
         .alignment(Alignment::Center),
     );
+    lines.push(Line::from(""));
+    lines.push(Line::from(""));
 
     let paragraph = Paragraph::new(lines);
     f.render_widget(paragraph, inner);
@@ -448,20 +457,28 @@ fn draw_token_input(f: &mut Frame, app: &App) {
     } else {
         for (i, token) in app.token_list.iter().enumerate() {
             let is_selected = app.token_cursor == Some(i);
+            let is_disabled = app.token_disabled.get(i).copied().unwrap_or(false);
             let display = mask_token(token);
+            let (dot, dot_color) = if is_disabled { ("○", SUBTLE) } else { ("●", GREEN) };
             if is_selected {
+                let toggle_label = if is_disabled { " on " } else { " off " };
                 token_lines.push(Line::from(vec![
                     Span::styled(" > ", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("{}. ", i + 1), Style::default().fg(CYAN)),
-                    Span::styled(display.clone(), Style::default().fg(TEXT)),
+                    Span::styled(dot, Style::default().fg(dot_color)),
+                    Span::styled(format!(" {}. ", i + 1), Style::default().fg(CYAN)),
+                    Span::styled(display.clone(), Style::default().fg(if is_disabled { DIM } else { TEXT })),
+                    Span::styled("  ", Style::default()),
+                    Span::styled(" Space ", Style::default().fg(Color::Black).bg(CYAN)),
+                    Span::styled(toggle_label, Style::default().fg(DIM)),
                     Span::styled("  ", Style::default()),
                     Span::styled(" Del ", Style::default().fg(Color::White).bg(RED)),
                 ]));
             } else {
                 token_lines.push(Line::from(vec![
                     Span::styled("   ", Style::default()),
-                    Span::styled(format!("{}. ", i + 1), Style::default().fg(DIM)),
-                    Span::styled(display.clone(), Style::default().fg(DIM)),
+                    Span::styled(dot, Style::default().fg(dot_color)),
+                    Span::styled(format!(" {}. ", i + 1), Style::default().fg(DIM)),
+                    Span::styled(display.clone(), Style::default().fg(if is_disabled { SUBTLE } else { DIM })),
                 ]));
             }
         }
@@ -506,11 +523,123 @@ fn draw_token_input(f: &mut Frame, app: &App) {
         Line::from(Span::styled(&msg.text, Style::default().fg(color)))
     } else {
         Line::from(Span::styled(
-            " K: back  ↑↓: navigate tokens",
+            " K: back  ↑↓: navigate  Space: toggle  Del: delete",
             Style::default().fg(DIM),
         ))
     };
     f.render_widget(Paragraph::new(line), chunks[3]);
+}
+
+// ── Binary Path Input ──────────────────────────────────────────
+
+fn draw_binary_path_input(f: &mut Frame, app: &App) {
+    let size = f.area();
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5), // guide panel
+            Constraint::Length(3), // input panel
+            Constraint::Length(1), // status bar
+        ])
+        .split(size);
+
+    // ── Guide panel ──
+    let current_path = app.cokacdir_path.as_deref();
+    let path_valid = !app.binary_path_input.is_empty()
+        && std::path::Path::new(&app.binary_path_input).is_file();
+    let path_empty = app.binary_path_input.is_empty();
+
+    let guide_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(SUBTLE))
+        .title(Span::styled(
+            " Binary Path ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
+        .padding(Padding::horizontal(1));
+    let guide_inner = guide_block.inner(chunks[0]);
+    f.render_widget(guide_block, chunks[0]);
+
+    let mut guide_lines = vec![
+        Line::from(vec![
+            Span::styled("Set a custom path for the ", Style::default().fg(DIM)),
+            Span::styled("cokacdir", Style::default().fg(TEXT).add_modifier(Modifier::BOLD)),
+            Span::styled(" binary.", Style::default().fg(DIM)),
+        ]),
+        Line::from(vec![
+            Span::styled("Leave empty to use auto-detection.", Style::default().fg(DIM)),
+        ]),
+    ];
+
+    if let Some(path) = current_path {
+        guide_lines.push(Line::from(vec![
+            Span::styled("Current path: ", Style::default().fg(LABEL)),
+            Span::styled(path.to_string(), Style::default().fg(DIM)),
+        ]));
+    } else {
+        guide_lines.push(Line::from(Span::styled(
+            "Current path: not found",
+            Style::default().fg(RED),
+        )));
+    }
+
+    f.render_widget(Paragraph::new(guide_lines), guide_inner);
+
+    // ── Input panel ──
+    let (border_color, validity_hint) = if path_empty {
+        (CYAN, "")
+    } else if path_valid {
+        (GREEN, "  valid")
+    } else {
+        (RED, "  not found")
+    };
+
+    let mut hint_spans = vec![];
+    if !validity_hint.is_empty() {
+        let color = if path_valid { GREEN } else { RED };
+        hint_spans.push(Span::styled(validity_hint, Style::default().fg(color)));
+        hint_spans.push(Span::styled("  ", Style::default()));
+    }
+    hint_spans.push(Span::styled(" Enter ", Style::default().fg(Color::Black).bg(ACCENT)));
+    hint_spans.push(Span::styled(" Save ", Style::default().fg(DIM)));
+    hint_spans.push(Span::styled(" Esc ", Style::default().fg(DIM).bg(SUBTLE)));
+    hint_spans.push(Span::styled(" Cancel ", Style::default().fg(DIM)));
+
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_color))
+        .title(Span::styled(" Path ", Style::default().fg(ACCENT)))
+        .title(
+            Title::from(Line::from(hint_spans))
+                .alignment(Alignment::Right)
+                .position(ratatui::widgets::block::Position::Bottom),
+        )
+        .padding(Padding::horizontal(1));
+    let input_inner = input_block.inner(chunks[1]);
+    f.render_widget(input_block, chunks[1]);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            format!("{}_", app.binary_path_input),
+            Style::default().fg(TEXT),
+        )),
+        input_inner,
+    );
+
+    // ── Status bar ──
+    let line = if let Some(msg) = &app.status_message {
+        let color = if msg.is_error { RED } else { GREEN };
+        Line::from(Span::styled(&msg.text, Style::default().fg(color)))
+    } else {
+        Line::from(Span::styled(
+            " Type the full path to the cokacdir binary, or leave empty for auto-detection",
+            Style::default().fg(DIM),
+        ))
+    };
+    f.render_widget(Paragraph::new(line), chunks[2]);
 }
 
 fn mask_token(token: &str) -> String {

@@ -5,10 +5,11 @@ use std::io::{BufRead, BufReader};
 
 pub fn start() -> Result<(), String> {
     let config = Config::load();
-    if config.tokens.is_empty() {
-        return Err("No tokens configured. Use 'cokacctl token <TOKEN>' first.".into());
+    let tokens = config.active_tokens();
+    if tokens.is_empty() {
+        return Err("No active tokens configured. Use 'cokacctl token <TOKEN>' first.".into());
     }
-    dlog!("cli::service", "start: {} tokens", config.tokens.len());
+    dlog!("cli::service", "start: {} active tokens", tokens.len());
     let binary_path = platform::find_cokacdir().ok_or(
         "cokacdir not found in PATH. Run 'cokacctl install' first.".to_string(),
     )?;
@@ -17,9 +18,9 @@ pub fn start() -> Result<(), String> {
 
     println!("  Starting cokacdir service...");
     println!("  Binary: {}", binary_path.display());
-    println!("  Tokens: {} bot(s)", config.tokens.len());
+    println!("  Tokens: {} bot(s)", tokens.len());
 
-    mgr.start(&binary_path, &config.tokens)?;
+    mgr.start(&binary_path, &tokens)?;
 
     dlog!("cli::service", "Service started");
     println!("  Service started.");
@@ -40,8 +41,9 @@ pub fn stop() -> Result<(), String> {
 pub fn restart() -> Result<(), String> {
     dlog!("cli::service", "restart");
     let config = Config::load();
-    if config.tokens.is_empty() {
-        return Err("No tokens configured. Use 'cokacctl start <TOKEN>' first.".into());
+    let tokens = config.active_tokens();
+    if tokens.is_empty() {
+        return Err("No active tokens configured. Use 'cokacctl start <TOKEN>' first.".into());
     }
     let binary_path = platform::find_cokacdir().ok_or(
         "cokacdir not found in PATH.".to_string(),
@@ -49,7 +51,7 @@ pub fn restart() -> Result<(), String> {
     let mgr = service::manager();
 
     println!("  Restarting cokacdir service...");
-    mgr.restart(&binary_path, &config.tokens)?;
+    mgr.restart(&binary_path, &tokens)?;
     dlog!("cli::service", "Service restarted");
     println!("  Service restarted.");
     Ok(())
@@ -85,6 +87,7 @@ pub fn token(tokens: Vec<String>) -> Result<(), String> {
 
     let mut config = Config::load();
     config.tokens = tokens.clone();
+    config.disabled_tokens.clear();
     config.save()?;
 
     dlog!("cli::service", "Tokens saved");

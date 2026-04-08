@@ -86,10 +86,11 @@ async fn run_inner(tx: &Option<ProgressTx>) -> Result<(), String> {
 
     if was_running {
         let config = Config::load();
-        if !config.tokens.is_empty() {
+        let tokens = config.active_tokens();
+        if !tokens.is_empty() {
             dlog!("update", "Restarting service...");
             send(tx, "  Restarting service...".into());
-            mgr.start(&binary_path, &config.tokens).ok();
+            mgr.start(&binary_path, &tokens).ok();
         }
     }
 
@@ -143,11 +144,12 @@ async fn update_with_sudo(
 
     if was_running {
         let config = crate::core::config::Config::load();
-        if !config.tokens.is_empty() {
+        let tokens = config.active_tokens();
+        if !tokens.is_empty() {
             dlog!("update", "Restarting service after sudo update...");
             send(tx, "  Restarting service...".into());
             let mgr = crate::service::manager();
-            mgr.start(dest, &config.tokens).ok();
+            mgr.start(dest, &tokens).ok();
         }
     }
 

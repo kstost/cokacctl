@@ -28,6 +28,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     match app.view {
         View::Welcome => handle_welcome_key(app, key),
         View::TokenInput => handle_token_input_key(app, key),
+        View::BinaryPathInput => handle_binary_path_input_key(app, key),
         View::Progress => handle_progress_key(app, key),
         View::Dashboard => handle_dashboard_key(app, key),
         View::LogFullscreen => handle_log_key(app, key),
@@ -49,6 +50,10 @@ fn handle_welcome_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Char('i') | KeyCode::Char('I') => {
             dlog!("event", "Welcome: install");
             app.start_progress(ProgressAction::Install);
+        }
+        KeyCode::Char('p') | KeyCode::Char('P') => {
+            dlog!("event", "Welcome: binary path input");
+            app.enter_binary_path_input();
         }
         _ => {}
     }
@@ -72,8 +77,8 @@ fn handle_progress_key(app: &mut App, key: KeyEvent) -> bool {
                 app.refresh_cokacdir_info();
                 app.progress_rx = None;
 
-                if was_install && succeeded && app.cokacdir_version.is_some() {
-                    if app.config.tokens.is_empty() {
+                if was_install && succeeded && app.cokacdir_path.is_some() {
+                    if app.config.active_tokens().is_empty() {
                         dlog!("event", "Install done, entering token input");
                         app.enter_token_input();
                     } else {
@@ -85,7 +90,7 @@ fn handle_progress_key(app: &mut App, key: KeyEvent) -> bool {
                     dlog!("event", "Update done, going to dashboard");
                     app.view = View::Dashboard;
                     app.set_status("Update completed", false);
-                } else if was_install && app.cokacdir_version.is_none() {
+                } else if was_install && app.cokacdir_path.is_none() {
                     dlog!("event", "Install failed, back to welcome");
                     app.view = View::Welcome;
                 } else {
@@ -101,17 +106,32 @@ fn handle_token_input_key(app: &mut App, key: KeyEvent) -> bool {
     match key.code {
         KeyCode::Esc => {
             dlog!("event", "TokenInput: Esc - saving {} tokens", app.token_list.len());
+            dlog!("event", "  disabled: {:?}", app.token_disabled);
+            dlog!("event", "  service_status before save: {:?}", app.service_status);
+            dlog!("event", "  running_token_count before save: {:?}", app.running_token_count);
             // Save token changes to config
             let mut config = Config::load();
             config.tokens = app.token_list.clone();
+            config.disabled_tokens = app.token_list.iter()
+                .zip(app.token_disabled.iter())
+                .filter_map(|(t, &disabled)| if disabled { Some(t.clone()) } else { None })
+                .collect();
+            dlog!("event", "  saving config: total={} active={} disabled={}",
+                config.tokens.len(),
+                config.active_tokens().len(),
+                config.disabled_tokens.len());
             config.save().ok();
 
             app.token_input.clear();
             app.token_list.clear();
+            app.token_disabled.clear();
             app.token_cursor = None;
             app.refresh_status();
-            if app.cokacdir_version.is_some() {
+            if app.cokacdir_path.is_some() {
                 app.view = View::Dashboard;
+                if app.service_status == service::ServiceStatus::Running {
+                    app.set_status("Restart service for changes to take effect", false);
+                }
             } else {
                 app.view = View::Welcome;
             }
@@ -145,10 +165,19 @@ fn handle_token_input_key(app: &mut App, key: KeyEvent) -> bool {
                 None => {}
             }
         }
+        KeyCode::Char(' ') if app.token_cursor.is_some() => {
+            if let Some(i) = app.token_cursor {
+                if let Some(disabled) = app.token_disabled.get_mut(i) {
+                    *disabled = !*disabled;
+                    dlog!("event", "TokenInput: toggled token {} disabled={}", i, *disabled);
+                }
+            }
+        }
         KeyCode::Delete | KeyCode::Backspace if app.token_cursor.is_some() => {
             if let Some(i) = app.token_cursor {
                 dlog!("event", "TokenInput: removing token at index {}", i);
                 app.token_list.remove(i);
+                app.token_disabled.remove(i);
                 if app.token_list.is_empty() {
                     app.token_cursor = None;
                 } else if i >= app.token_list.len() {
@@ -163,6 +192,7 @@ fn handle_token_input_key(app: &mut App, key: KeyEvent) -> bool {
                     dlog!("event", "TokenInput: adding token (len {})", token.len());
                     if !app.token_list.contains(&token) {
                         app.token_list.push(token);
+                        app.token_disabled.push(false);
                     }
                     app.token_input.clear();
                 }
@@ -223,6 +253,60 @@ fn handle_dashboard_key(app: &mut App, key: KeyEvent) -> bool {
             dlog!("event", "Dashboard: install");
             app.start_progress(ProgressAction::Install);
         }
+        KeyCode::Char('p') | KeyCode::Char('P') => {
+            dlog!("event", "Dashboard: binary path input");
+            app.enter_binary_path_input();
+        }
+        _ => {}
+    }
+    true
+}
+
+fn handle_binary_path_input_key(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            dlog!("event", "BinaryPathInput: Ctrl+C");
+            app.running = false;
+            return false;
+        }
+        KeyCode::Esc => {
+            dlog!("event", "BinaryPathInput: Esc - discarding");
+            app.binary_path_input.clear();
+            if app.cokacdir_path.is_some() {
+                app.view = View::Dashboard;
+            } else {
+                app.view = View::Welcome;
+            }
+        }
+        KeyCode::Enter => {
+            dlog!("event", "BinaryPathInput: Enter - saving");
+            let input = app.binary_path_input.trim().to_string();
+            if !input.is_empty() && !std::path::Path::new(&input).is_file() {
+                app.set_status("Path not found — enter a valid file path", true);
+                return true;
+            }
+            let mut config = Config::load();
+            config.install_path = if input.is_empty() { None } else { Some(input) };
+            if let Err(e) = config.save() {
+                app.set_status(&format!("Failed to save: {}", e), true);
+                return true;
+            }
+            dlog!("event", "BinaryPathInput: saved install_path = {:?}", config.install_path);
+            app.binary_path_input.clear();
+            app.refresh_cokacdir_info();
+            if app.cokacdir_path.is_some() {
+                app.view = View::Dashboard;
+                app.set_status("Binary path saved", false);
+            } else {
+                app.view = View::Welcome;
+            }
+        }
+        KeyCode::Backspace => {
+            app.binary_path_input.pop();
+        }
+        KeyCode::Char(c) => {
+            app.binary_path_input.push(c);
+        }
         _ => {}
     }
     true
@@ -273,8 +357,9 @@ fn action_start(app: &mut App) {
         return;
     }
     let config = Config::load();
-    if config.tokens.is_empty() {
-        dlog!("event::action_start", "No tokens, entering token input");
+    let tokens = config.active_tokens();
+    if tokens.is_empty() {
+        dlog!("event::action_start", "No active tokens, entering token input");
         app.enter_token_input();
         return;
     }
@@ -294,7 +379,6 @@ fn action_start(app: &mut App) {
     app.service_busy_tick = 0;
     dlog!("event::action_start", "Spawning start thread...");
     let (tx, rx) = std::sync::mpsc::channel();
-    let tokens = config.tokens.clone();
     std::thread::spawn(move || {
         let mgr = service::manager();
         if mgr.is_any_running() {
@@ -337,9 +421,10 @@ fn action_restart(app: &mut App) {
         return;
     }
     let config = Config::load();
-    if config.tokens.is_empty() {
-        dlog!("event::action_restart", "No tokens configured");
-        app.set_status("No tokens configured", true);
+    let tokens = config.active_tokens();
+    if tokens.is_empty() {
+        dlog!("event::action_restart", "No active tokens configured");
+        app.set_status("No active tokens configured", true);
         return;
     }
     let binary_path = match platform::find_cokacdir() {
@@ -355,7 +440,6 @@ fn action_restart(app: &mut App) {
     app.service_busy_tick = 0;
     dlog!("event::action_restart", "Spawning restart thread...");
     let (tx, rx) = std::sync::mpsc::channel();
-    let tokens = config.tokens.clone();
     std::thread::spawn(move || {
         let mgr = service::manager();
         let result = mgr.restart(&binary_path, &tokens);

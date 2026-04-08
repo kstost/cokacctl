@@ -115,9 +115,10 @@ fn run_status() -> Result<(), String> {
     println!("  Service:   {} {}", symbol, status);
 
     let config = core::config::Config::load();
-    dlog!("main::status", "Config loaded, tokens: {}", config.tokens.len());
+    let active = config.active_tokens();
+    dlog!("main::status", "Config loaded, tokens: {}/{}", active.len(), config.tokens.len());
     if !config.tokens.is_empty() {
-        println!("  Tokens:    {} bot(s)", config.tokens.len());
+        println!("  Tokens:    {} bot(s)", active.len());
     }
     if let Some(log) = mgr.log_path() {
         dlog!("main::status", "Log path: {}", log.display());

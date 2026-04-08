@@ -84,10 +84,11 @@ async fn run_inner(tx: &Option<ProgressTx>) -> Result<(), String> {
     // Restart service if it was running
     if was_running {
         let config = crate::core::config::Config::load();
-        if !config.tokens.is_empty() {
+        let tokens = config.active_tokens();
+        if !tokens.is_empty() {
             dlog!("install", "Restarting service...");
             send(tx, "  Restarting service...".into());
-            mgr.start(&dest, &config.tokens).ok();
+            mgr.start(&dest, &tokens).ok();
         }
     }
 
@@ -108,30 +109,35 @@ async fn install_with_sudo(url: &str, dest: &std::path::Path, was_running: bool,
         .status()
         .map_err(|e| format!("sudo mv failed: {}", e))?;
 
-    if !status.success() {
+    let actual_path = if !status.success() {
         let fallback = platform::fallback_install_path();
         dlog!("install", "sudo failed, falling back to {}", fallback.display());
         send(tx, format!("  sudo failed. Installing to {} instead.", fallback.display()));
+        if let Some(parent) = fallback.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
         std::fs::rename(&tmp, &fallback).or_else(|_| {
             std::fs::copy(&tmp, &fallback).map(|_| ()).map_err(|e| format!("Copy failed: {}", e))
         })?;
         std::fs::remove_file(&tmp).ok();
         send(tx, format!("  cokacdir installed at {}", fallback.display()));
         send(tx, format!("  Note: Ensure {} is in your PATH", fallback.parent().unwrap_or(std::path::Path::new("~/.local/bin")).display()));
+        fallback
     } else {
         dlog!("install", "sudo mv succeeded");
         send(tx, format!("  cokacdir installed at {}", dest.display()));
-    }
+        dest.to_path_buf()
+    };
 
     setup_shell_wrapper_inner(tx);
 
     if was_running {
         let config = crate::core::config::Config::load();
-        if !config.tokens.is_empty() {
+        let tokens = config.active_tokens();
+        if !tokens.is_empty() {
             dlog!("install", "Restarting service after sudo install...");
             send(tx, "  Restarting service...".into());
-            let installed = platform::find_cokacdir().unwrap_or_else(|| dest.to_path_buf());
-            crate::service::manager().start(&installed, &config.tokens).ok();
+            crate::service::manager().start(&actual_path, &tokens).ok();
         }
     }
 
