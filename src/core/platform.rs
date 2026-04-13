@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -158,9 +159,19 @@ pub fn which(name: &str) -> Option<PathBuf> {
 pub struct ServicePaths {
     pub service_file: PathBuf,
     pub wrapper_script: PathBuf,
+    pub state_file: PathBuf,
     pub log_dir: PathBuf,
     pub log_file: PathBuf,
     pub error_log_file: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowsServiceState {
+    pub schema_version: u32,
+    pub task_name: String,
+    pub wrapper_script: String,
+    pub binary_path: String,
+    pub token_count: usize,
 }
 
 impl ServicePaths {
@@ -172,6 +183,7 @@ impl ServicePaths {
                 ServicePaths {
                     service_file: home.join("Library/LaunchAgents/com.cokacdir.server.plist"),
                     wrapper_script: log_dir.join("run.sh"),
+                    state_file: log_dir.join("service-state.json"),
                     log_dir: log_dir.clone(),
                     log_file: log_dir.join("cokacdir.log"),
                     error_log_file: log_dir.join("cokacdir.error.log"),
@@ -185,6 +197,7 @@ impl ServicePaths {
                 ServicePaths {
                     service_file: home.join(".config/systemd/user/cokacdir.service"),
                     wrapper_script: log_dir.join("run.sh"),
+                    state_file: log_dir.join("service-state.json"),
                     log_dir: log_dir.clone(),
                     log_file: log_dir.join("cokacdir.log"),
                     error_log_file: log_dir.join("cokacdir.error.log"),
@@ -195,6 +208,7 @@ impl ServicePaths {
                 ServicePaths {
                     service_file: PathBuf::new(), // Task Scheduler has no file
                     wrapper_script: home.join(".cokacdir").join("scripts").join("run.bat"),
+                    state_file: home.join(".cokacdir").join("windows-service.json"),
                     log_dir: log_dir.clone(),
                     log_file: log_dir.join("cokacdir.log"),
                     error_log_file: log_dir.join("cokacdir.error.log"),
@@ -207,6 +221,11 @@ impl ServicePaths {
 
     /// Read the wrapper script and count how many tokens were passed when the service last started.
     pub fn running_token_count(&self) -> Option<usize> {
+        if cfg!(windows) {
+            if let Some(state) = self.windows_service_state() {
+                return Some(state.token_count);
+            }
+        }
         dlog!("platform::rtc", "wrapper_script path: '{}'", self.wrapper_script.display());
         dlog!("platform::rtc", "wrapper_script exists: {}", self.wrapper_script.exists());
 
@@ -232,6 +251,11 @@ impl ServicePaths {
 
         dlog!("platform::rtc", "marker '--ccserver -- ' not found in any line");
         None
+    }
+
+    pub fn windows_service_state(&self) -> Option<WindowsServiceState> {
+        let content = std::fs::read_to_string(&self.state_file).ok()?;
+        serde_json::from_str(&content).ok()
     }
 }
 

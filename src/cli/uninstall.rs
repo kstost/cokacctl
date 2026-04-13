@@ -114,6 +114,20 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
+                let mut ps = Command::new("powershell");
+                ps.args(["-NoProfile", "-NonInteractive", "-Command",
+                    "Stop-ScheduledTask -TaskName 'cokacdir' -ErrorAction SilentlyContinue"]);
+                ps.creation_flags(0x08000000);
+                match ps.output() {
+                    Ok(out) => {
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        dlog!("uninstall", "Stop-ScheduledTask exit={}, stderr='{}'", out.status, stderr.trim());
+                    }
+                    Err(e) => {
+                        dlog!("uninstall", "Stop-ScheduledTask failed: {}", e);
+                    }
+                }
+
                 let mut cmd = Command::new("schtasks");
                 cmd.args(["/Delete", "/TN", "cokacdir", "/F"]);
                 cmd.creation_flags(0x08000000);
@@ -122,16 +136,17 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
                     _ => println!("    schtasks delete: skipped (not registered)"),
                 }
 
-                // Kill all cokacdir* processes
                 dlog!("uninstall", "Killing all cokacdir* processes via PowerShell...");
-                let mut ps = Command::new("powershell");
-                ps.args(["-NoProfile", "-NonInteractive", "-Command",
+                let mut ps_kill = Command::new("powershell");
+                ps_kill.args(["-NoProfile", "-NonInteractive", "-Command",
                     "Get-Process | Where-Object { $_.ProcessName -like 'cokacdir*' } | ForEach-Object { Write-Output \"Killing PID=$($_.Id) Name=$($_.ProcessName)\"; Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }"]);
-                ps.creation_flags(0x08000000);
-                match ps.output() {
+                ps_kill.creation_flags(0x08000000);
+                match ps_kill.output() {
                     Ok(out) => {
                         let stdout = String::from_utf8_lossy(&out.stdout);
-                        dlog!("uninstall", "kill cokacdir* exit={}, stdout='{}'", out.status, stdout.trim());
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        dlog!("uninstall", "kill cokacdir* exit={}, stdout='{}', stderr='{}'",
+                            out.status, stdout.trim(), stderr.trim());
                     }
                     Err(e) => {
                         dlog!("uninstall", "kill cokacdir* failed: {}", e);
@@ -217,6 +232,7 @@ fn collect_paths(home: &PathBuf, os: Os) -> (Vec<PathBuf>, Vec<PathBuf>) {
         Os::Windows => (
             vec![
                 home.join("cokacdir.exe"),
+                home.join(".cokacdir/windows-service.json"),
             ],
             vec![
                 home.join(".cokacdir/logs"),
