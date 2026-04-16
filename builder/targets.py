@@ -46,11 +46,11 @@ class Target:
 
         # Determine if zigbuild is needed (not for Windows targets)
         # 1. macOS targets when building on Linux
-        # 2. Linux cross-architecture builds (e.g., aarch64 -> x86_64)
+        # 2. All Linux targets (to pin GLIBC version for broad compatibility)
         needs_zigbuild = (
             platform != "windows" and (
                 (platform == "macos" and config.host_os == "linux") or
-                (platform == "linux" and config.host_os == "linux" and arch != config.host_arch)
+                (platform == "linux" and config.host_os == "linux")
             )
         )
 
@@ -58,8 +58,8 @@ class Target:
         # Not needed when building on Windows natively
         needs_xwin = platform == "windows" and config.host_os != "windows"
 
-        # Check if native
-        is_native = (platform == config.host_os) and (arch == config.host_arch)
+        # Check if native (zigbuild targets are not native since --target is passed explicitly)
+        is_native = (platform == config.host_os) and (arch == config.host_arch) and not needs_zigbuild
 
         return cls(
             rust_target=rust_target,

@@ -269,6 +269,19 @@ def needs_cross_compilation(targets: list) -> bool:
         target = target.lower()
         if target in ("macos", "macos-arm64", "macos-x86_64", "all"):
             return True
+        if target in ("linux", "linux-arm64", "linux-x86_64"):
+            return True
+        if target in RUST_TARGETS and ("apple-darwin" in RUST_TARGETS[target] or "linux" in RUST_TARGETS[target]):
+            return True
+    return False
+
+
+def needs_macos_cross(targets: list) -> bool:
+    """Check if any target requires macOS SDK."""
+    for target in targets:
+        target = target.lower()
+        if target in ("macos", "macos-arm64", "macos-x86_64", "all"):
+            return True
         if target in RUST_TARGETS and "apple-darwin" in RUST_TARGETS[target]:
             return True
     return False
@@ -358,14 +371,30 @@ def main() -> int:
 
     # Check if cross-compilation is needed
     if needs_cross_compilation(targets):
-        # Check if cross-compilation tools are installed
-        if not tool_installer.is_zig_installed() or not tool_installer.is_macos_sdk_installed() or not tool_installer.is_cargo_zigbuild_installed():
+        # Check zigbuild tools (zig + cargo-zigbuild) — needed for Linux and macOS targets
+        missing_zig = not tool_installer.is_zig_installed()
+        missing_zigbuild = not tool_installer.is_cargo_zigbuild_installed()
+        # macOS SDK — only needed for macOS targets
+        missing_sdk = needs_macos_cross(targets) and not tool_installer.is_macos_sdk_installed()
+
+        if missing_zig or missing_zigbuild or missing_sdk:
             if auto_setup:
                 logger.warning("Cross-compilation tools not installed. Installing...")
                 logger.newline()
-                if not tool_installer.setup_cross_compile():
-                    logger.error("Failed to install cross-compilation tools")
-                    return 1
+                if missing_sdk:
+                    if not tool_installer.setup_cross_compile():
+                        logger.error("Failed to install cross-compilation tools")
+                        return 1
+                else:
+                    # Linux-only: install zig + cargo-zigbuild without macOS SDK
+                    success = True
+                    if missing_zig and not tool_installer.install_zig():
+                        success = False
+                    if missing_zigbuild and not tool_installer.install_cargo_zigbuild():
+                        success = False
+                    if not success:
+                        logger.error("Failed to install cross-compilation tools")
+                        return 1
             else:
                 logger.error("Cross-compilation tools not installed.")
                 logger.info("Run with --setup or --setup-cross first.")

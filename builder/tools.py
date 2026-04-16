@@ -206,7 +206,11 @@ class ToolInstaller:
         archive_path = self.tools_dir / archive_name
 
         if not archive_path.exists():
-            if not self.download_file(self.config.zig_url, archive_path, "Zig compiler"):
+            local_cache = Path.home() / ".rustbuilder" / archive_name
+            if local_cache.exists():
+                self.logger.info(f"Using cached {archive_name} from {local_cache.parent}")
+                shutil.copy2(local_cache, archive_path)
+            elif not self.download_file(self.config.zig_url, archive_path, "Zig compiler"):
                 return False
 
         # Extract to tools directory
@@ -454,7 +458,11 @@ class ToolInstaller:
         archive_path = self.tools_dir / archive_name
 
         if not archive_path.exists():
-            if not self.download_file(
+            local_cache = Path.home() / ".rustbuilder" / archive_name
+            if local_cache.exists():
+                self.logger.info(f"Using cached {archive_name} from {local_cache.parent}")
+                shutil.copy2(local_cache, archive_path)
+            elif not self.download_file(
                 self.config.macos_sdk_url, archive_path, "macOS SDK"
             ):
                 return False

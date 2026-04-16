@@ -92,8 +92,10 @@ class BuildExecutor:
         if self.config.release:
             cmd.append("--release")
 
-        # Add target
-        if not target.is_native:
+        # Add target (zigbuild Linux targets use .2.17 suffix for GLIBC compatibility)
+        if target.needs_zigbuild and target.platform == "linux":
+            cmd.extend(["--target", f"{target.rust_target}.2.17"])
+        elif not target.is_native:
             cmd.extend(["--target", target.rust_target])
 
         # Get environment
@@ -255,13 +257,13 @@ exec {clang_path} "${{args[@]}}"
         if needs_zigbuild:
             if not self.tool_installer.is_zig_installed():
                 self.logger.error(
-                    "Zig is required for macOS cross-compilation. Run with --setup first."
+                    "Zig is required for cross-compilation. Run with --setup first."
                 )
                 return []
 
             if not self.tool_installer.is_cargo_zigbuild_installed():
                 self.logger.error(
-                    "cargo-zigbuild is required for macOS cross-compilation. Run with --setup first."
+                    "cargo-zigbuild is required for cross-compilation. Run with --setup first."
                 )
                 return []
 
@@ -355,11 +357,18 @@ def run_build(
 
     # Check if cross-compilation setup is needed (zigbuild for macOS/Linux)
     needs_zigbuild_setup = any(t.needs_zigbuild for t in resolved_targets)
+    needs_macos = any(t.platform == "macos" for t in resolved_targets)
     if needs_zigbuild_setup:
-        if not tool_installer.is_zig_installed() or not tool_installer.is_macos_sdk_installed():
+        missing_zig = not tool_installer.is_zig_installed()
+        missing_sdk = needs_macos and not tool_installer.is_macos_sdk_installed()
+        if missing_zig or missing_sdk:
             logger.header("Cross-compilation Setup Required")
-            if not tool_installer.setup_cross_compile():
-                return False
+            if missing_sdk:
+                if not tool_installer.setup_cross_compile():
+                    return False
+            else:
+                if not tool_installer.install_zig():
+                    return False
             logger.newline()
 
     # Check if Windows cross-compilation setup is needed
