@@ -360,14 +360,20 @@ def run_build(
     needs_macos = any(t.platform == "macos" for t in resolved_targets)
     if needs_zigbuild_setup:
         missing_zig = not tool_installer.is_zig_installed()
+        missing_zigbuild = not tool_installer.is_cargo_zigbuild_installed()
         missing_sdk = needs_macos and not tool_installer.is_macos_sdk_installed()
-        if missing_zig or missing_sdk:
+        if missing_zig or missing_zigbuild or missing_sdk:
             logger.header("Cross-compilation Setup Required")
             if missing_sdk:
                 if not tool_installer.setup_cross_compile():
                     return False
             else:
-                if not tool_installer.install_zig():
+                success = True
+                if missing_zig and not tool_installer.install_zig():
+                    success = False
+                if missing_zigbuild and not tool_installer.install_cargo_zigbuild():
+                    success = False
+                if not success:
                     return False
             logger.newline()
 

@@ -17,6 +17,7 @@ Examples:
 """
 
 import argparse
+import platform
 import sys
 from pathlib import Path
 
@@ -249,7 +250,8 @@ def collect_targets(args: argparse.Namespace) -> list:
 def ensure_rust_installed(tool_installer: ToolInstaller, logger: Logger, auto_setup: bool) -> bool:
     """Ensure Rust is installed with a default toolchain, install if needed and allowed."""
     if tool_installer.is_rust_installed():
-        tool_installer._ensure_default_toolchain()
+        if not tool_installer._ensure_default_toolchain():
+            logger.warning("Failed to configure default Rust toolchain")
         return True
 
     if not auto_setup:
@@ -267,6 +269,11 @@ def needs_cross_compilation(targets: list) -> bool:
     """Check if any target requires cross-compilation tools (zigbuild)."""
     for target in targets:
         target = target.lower()
+        if target == "native":
+            # On Linux, native builds also need zigbuild for GLIBC pinning
+            if platform.system().lower() == "linux":
+                return True
+            continue
         if target in ("macos", "macos-arm64", "macos-x86_64", "all"):
             return True
         if target in ("linux", "linux-arm64", "linux-x86_64"):
