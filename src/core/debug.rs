@@ -1,11 +1,20 @@
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
-/// Master switch for debug logging. Always on so every cokacctl action is
-/// captured without needing environment setup.
-pub const DEBUG_ENABLED: bool = true;
+/// Master switch for debug logging. Off by default; enabled at startup when
+/// the user passes `--debug` on the command line.
+static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_debug_enabled(enabled: bool) {
+    DEBUG_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+pub fn debug_enabled() -> bool {
+    DEBUG_ENABLED.load(Ordering::Relaxed)
+}
 
 /// Rotate the active log file once it grows past this size. Rotated files are
 /// renamed with a timestamp suffix and kept forever (no retention policy) —
@@ -63,7 +72,7 @@ fn rotate_if_needed(state: &mut LogState) {
 }
 
 pub fn log(module: &str, msg: &str) {
-    if !DEBUG_ENABLED {
+    if !debug_enabled() {
         return;
     }
     let guard = get_log_state();
@@ -95,7 +104,7 @@ pub fn decode_output(bytes: &[u8]) -> String {
 /// Use this at every `Command::new(...).output()` site so failures can be
 /// reconstructed from the log alone.
 pub fn log_output(module: &str, label: &str, output: &std::process::Output) {
-    if !DEBUG_ENABLED {
+    if !debug_enabled() {
         return;
     }
     log(
@@ -123,7 +132,7 @@ pub fn log_output(module: &str, label: &str, output: &std::process::Output) {
 /// Log the result of an external command that was invoked via `.status()` —
 /// i.e. no stdout/stderr capture is available, only the exit code.
 pub fn log_status(module: &str, label: &str, status: &std::process::ExitStatus) {
-    if !DEBUG_ENABLED {
+    if !debug_enabled() {
         return;
     }
     log(

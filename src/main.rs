@@ -8,8 +8,9 @@ use clap::Parser;
 use cli::{Cli, Commands};
 
 fn main() {
-    dlog!("main", "=== cokacctl started (v{}) ===", env!("CARGO_PKG_VERSION"));
     let cli = Cli::parse();
+    core::debug::set_debug_enabled(cli.debug);
+    dlog!("main", "=== cokacctl started (v{}) ===", env!("CARGO_PKG_VERSION"));
 
     match cli.command {
         Some(command) => {

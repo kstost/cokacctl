@@ -54,6 +54,10 @@ Notes:
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
+
+    /// Enable debug logging to ~/.cokacdir/debug/cokacctl.log
+    #[arg(long, global = true)]
+    pub debug: bool,
 }
 
 #[derive(Debug, Subcommand)]
