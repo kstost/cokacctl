@@ -247,12 +247,22 @@ fn run_tui() {
                     let excess = app.log_lines.len() - 500;
                     app.log_lines.drain(..excess);
                 }
-                if app.log_scroll_offset > app.log_lines.len() {
-                    app.log_scroll_offset = app.log_lines.len();
+                let max_offset = app.max_log_scroll_offset();
+                if app.log_scroll_offset > max_offset {
+                    app.log_scroll_offset = max_offset;
                 }
             }
         }
         if tick_count % 25 == 0 {
+            dlog!(
+                "tui",
+                "Heartbeat tick {} view={:?} service={:?} log_lines={} scroll={}",
+                tick_count,
+                app.view,
+                app.service_status,
+                app.log_lines.len(),
+                app.log_scroll_offset
+            );
             dlog!("tui", "Periodic status refresh (tick {})", tick_count);
             app.refresh_status();
         }

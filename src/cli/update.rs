@@ -8,6 +8,23 @@ fn send(tx: &Option<ProgressTx>, msg: String) {
     }
 }
 
+/// Best-effort restart after an update step failed while the service was
+/// stopped — avoids leaving the user with a silently-down service.
+fn try_restart_existing(tx: &Option<ProgressTx>) {
+    let config = Config::load();
+    let tokens = config.active_tokens();
+    if tokens.is_empty() {
+        return;
+    }
+    if let Some(existing) = platform::find_cokacdir() {
+        dlog!("update", "Rollback: restarting with {}", existing.display());
+        send(tx, "  Update failed — restarting service with existing binary...".into());
+        let _ = crate::service::manager().start(&existing, &tokens);
+    } else {
+        dlog!("update", "Rollback: no existing binary found, cannot restart");
+    }
+}
+
 /// CLI entry point.
 pub async fn run() -> Result<(), String> {
     dlog!("update", "CLI run()");
@@ -80,7 +97,12 @@ async fn run_inner(tx: &Option<ProgressTx>) -> Result<(), String> {
         }
     }
 
-    download::download_to_path(&url, &binary_path, tx).await?;
+    if let Err(e) = download::download_to_path(&url, &binary_path, tx).await {
+        if was_running {
+            try_restart_existing(tx);
+        }
+        return Err(e);
+    }
     dlog!("update", "Download complete");
     send(tx, format!("  Updated to v{}", latest));
 
@@ -118,26 +140,83 @@ async fn update_with_sudo(
 ) -> Result<(), String> {
     dlog!("update", "update_with_sudo()");
     let tmp = std::env::temp_dir().join(format!("cokacdir_up_{}", std::process::id()));
-    download::download_to_path(url, &tmp, tx).await?;
+    if let Err(e) = download::download_to_path(url, &tmp, tx).await {
+        if was_running {
+            try_restart_existing(tx);
+        }
+        return Err(e);
+    }
 
     send(tx, "  Requires elevated privileges. Using sudo...".into());
     let mut cmd = std::process::Command::new("sudo");
     if tx.is_some() {
         cmd.arg("-n");
     }
-    let status = cmd
+    let sudo_label = format!(
+        "sudo{} mv {} {}",
+        if tx.is_some() { " -n" } else { "" },
+        tmp.display(),
+        dest.display()
+    );
+    dlog!("update", "Invoking: {}", sudo_label);
+    let status = match cmd
         .args(["mv", &tmp.to_string_lossy(), &dest.to_string_lossy()])
         .status()
-        .map_err(|e| format!("sudo mv failed: {}", e))?;
+    {
+        Ok(s) => {
+            crate::core::debug::log_status("update", &sudo_label, &s);
+            s
+        }
+        Err(e) => {
+            dlog!("update", "sudo mv exec failed: {}", e);
+            std::fs::remove_file(&tmp).ok();
+            if was_running {
+                try_restart_existing(tx);
+            }
+            return Err(format!("sudo mv failed: {}", e));
+        }
+    };
 
     if !status.success() {
         dlog!("update", "sudo mv failed");
+        std::fs::remove_file(&tmp).ok();
+        if was_running {
+            try_restart_existing(tx);
+        }
         return Err("sudo mv failed. Cannot update binary.".into());
     }
 
-    let _ = std::process::Command::new("sudo")
+    // chmod +x; log failure since the old binary is already gone and the new
+    // one may not be executable without this.
+    let chmod_label = format!("sudo chmod +x {}", dest.display());
+    dlog!("update", "Invoking: {}", chmod_label);
+    match std::process::Command::new("sudo")
         .args(["chmod", "+x", &dest.to_string_lossy()])
-        .status();
+        .status()
+    {
+        Ok(s) => {
+            crate::core::debug::log_status("update", &chmod_label, &s);
+            if s.success() {
+                dlog!("update", "chmod +x succeeded");
+            } else {
+                dlog!("update", "chmod +x returned non-zero: {:?}", s.code());
+                send(
+                    tx,
+                    format!(
+                        "  Warning: sudo chmod +x returned exit {:?} — binary may not be executable",
+                        s.code()
+                    ),
+                );
+            }
+        }
+        Err(e) => {
+            dlog!("update", "chmod +x failed to invoke: {}", e);
+            send(
+                tx,
+                format!("  Warning: could not run sudo chmod +x: {}", e),
+            );
+        }
+    }
 
     dlog!("update", "Binary updated via sudo");
     send(tx, "  Binary updated.".into());

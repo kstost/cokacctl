@@ -1,7 +1,6 @@
 use crate::core::config::Config;
 use crate::core::platform;
 use crate::service::{self, ServiceManager};
-use std::io::{BufRead, BufReader};
 
 pub fn start() -> Result<(), String> {
     let config = Config::load();
@@ -43,10 +42,10 @@ pub fn restart() -> Result<(), String> {
     let config = Config::load();
     let tokens = config.active_tokens();
     if tokens.is_empty() {
-        return Err("No active tokens configured. Use 'cokacctl start <TOKEN>' first.".into());
+        return Err("No active tokens configured. Use 'cokacctl token <TOKEN>' first.".into());
     }
     let binary_path = platform::find_cokacdir().ok_or(
-        "cokacdir not found in PATH.".to_string(),
+        "cokacdir not found in PATH. Run 'cokacctl install' first.".to_string(),
     )?;
     let mgr = service::manager();
 
@@ -114,8 +113,10 @@ fn print_management_hints(mgr: &dyn ServiceManager) {
 }
 
 fn tail_file(path: &std::path::Path) -> Result<(), String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("Cannot read log: {}", e))?;
+    // Read bytes and lossy-decode so non-UTF8 bytes in the log don't cause
+    // the whole command to fail.
+    let bytes = std::fs::read(path).map_err(|e| format!("Cannot read log: {}", e))?;
+    let content = String::from_utf8_lossy(&bytes);
     let lines: Vec<&str> = content.lines().collect();
     let start = if lines.len() > 20 { lines.len() - 20 } else { 0 };
     for line in &lines[start..] {
@@ -134,20 +135,24 @@ fn tail_file(path: &std::path::Path) -> Result<(), String> {
             Ok(m) => m.len(),
             Err(_) => continue,
         };
+        if current_len < pos {
+            pos = 0;
+        }
         if current_len > pos {
-            let file = match std::fs::File::open(path) {
+            let mut file = match std::fs::File::open(path) {
                 Ok(f) => f,
                 Err(_) => continue,
             };
-            let mut reader = BufReader::new(file);
-            use std::io::Seek;
-            if reader.seek(std::io::SeekFrom::Start(pos)).is_err() {
+            use std::io::{Read, Seek};
+            if file.seek(std::io::SeekFrom::Start(pos)).is_err() {
                 continue;
             }
-            let mut line = String::new();
-            while reader.read_line(&mut line).unwrap_or(0) > 0 {
-                print!("{}", line);
-                line.clear();
+            // Read raw bytes to avoid failing on non-UTF8 content, then
+            // lossy-decode. This is the CLI tail, so printing the batch in
+            // one go is acceptable.
+            let mut buf = Vec::new();
+            if file.read_to_end(&mut buf).is_ok() {
+                print!("{}", String::from_utf8_lossy(&buf));
             }
             pos = current_len;
         }

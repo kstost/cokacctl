@@ -51,6 +51,7 @@ The TUI provides a full dashboard with:
 | `R` | Restart service |
 | `D` | Remove service |
 | `K` | Manage bot tokens |
+| `P` | Set binary path |
 | `L` | Full-screen log viewer |
 | `Q` | Quit |
 
@@ -72,7 +73,7 @@ cokacctl token <TOKEN>            # Register a Telegram bot token
 cokacctl token <TOKEN1> <TOKEN2>  # Register multiple bot tokens (space-separated)
 ```
 
-Tokens are saved to `~/.cokacdir/config.json` and reused across start/restart. Registering new tokens overwrites previously saved ones. Get tokens from [@BotFather](https://t.me/BotFather) on Telegram (`/newbot`).
+Tokens are saved to `~/.cokacdir/cokacctl.json` and reused across start/restart. Registering new tokens overwrites previously saved ones. Get tokens from [@BotFather](https://t.me/BotFather) on Telegram (`/newbot`).
 
 **Service Management:**
 
@@ -124,7 +125,7 @@ cokacctl log                      # 5. Watch the log
 
 | File | Path |
 |------|------|
-| Config | `~/.cokacdir/config.json` |
+| Config | `~/.cokacdir/cokacctl.json` |
 | Service log | `~/.cokacdir/logs/cokacdir.log` (Windows) |
 | | `~/Library/Logs/cokacdir/cokacdir.log` (macOS) |
 | | `~/.local/state/cokacdir/cokacdir.log` (Linux) |

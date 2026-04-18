@@ -50,29 +50,100 @@ impl Config {
                 return Config::default();
             }
         };
-        let config: Config = serde_json::from_str(&content).unwrap_or_default();
-        dlog!("config", "Config loaded: {} tokens", config.tokens.len());
-        config
+        match serde_json::from_str::<Config>(&content) {
+            Ok(config) => {
+                dlog!("config", "Config loaded: {} tokens", config.tokens.len());
+                config
+            }
+            Err(e) => {
+                // Back up the corrupt file before falling back to defaults so
+                // that the user's tokens aren't silently overwritten on next save.
+                let backup = path.with_extension("json.bak");
+                let _ = std::fs::remove_file(&backup);
+                let renamed = std::fs::rename(&path, &backup).is_ok();
+                dlog!(
+                    "config",
+                    "Config parse failed ({}), backed up to {}: {}",
+                    e,
+                    backup.display(),
+                    renamed
+                );
+                eprintln!(
+                    "Warning: Config file corrupt ({}). Previous contents backed up to {}",
+                    e,
+                    backup.display()
+                );
+                Config::default()
+            }
+        }
     }
 
     /// Save config to disk with restricted permissions.
+    ///
+    /// On Unix, uses write-to-tmp + rename so the file is never visible at
+    /// default permissions (0644) — tokens would otherwise be briefly readable
+    /// by other users between `write` and `set_permissions`.
     pub fn save(&self) -> Result<(), String> {
-        dlog!("config", "Saving config ({} tokens)...", self.tokens.len());
+        dlog!("config", "Saving config ({} tokens, {} disabled)...", self.tokens.len(), self.disabled_tokens.len());
         let path = Self::path();
         if let Some(parent) = path.parent() {
+            dlog!("config", "Ensuring config dir exists: {}", parent.display());
             std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Cannot create config dir: {}", e))?;
+                .map_err(|e| {
+                    dlog!("config", "create_dir_all failed: {}", e);
+                    format!("Cannot create config dir: {}", e)
+                })?;
         }
         let content = serde_json::to_string_pretty(self)
             .map_err(|e| format!("JSON serialize failed: {}", e))?;
-        std::fs::write(&path, &content)
-            .map_err(|e| format!("Cannot write config: {}", e))?;
+        dlog!("config", "Serialized config: {} bytes", content.len());
 
-        // Restrict permissions on Unix (0o600)
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let tmp = path.with_extension("json.tmp");
+            match std::fs::remove_file(&tmp) {
+                Ok(_) => dlog!("config", "Cleared stale tmp: {}", tmp.display()),
+                Err(e) => dlog!("config", "Tmp cleanup: {} (ok if nonexistent)", e),
+            }
+            {
+                dlog!("config", "Opening tmp with mode 0o600: {}", tmp.display());
+                let mut file = std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .mode(0o600)
+                    .open(&tmp)
+                    .map_err(|e| {
+                        dlog!("config", "tmp open failed: {}", e);
+                        format!("Cannot create config temp: {}", e)
+                    })?;
+                file.write_all(content.as_bytes())
+                    .map_err(|e| {
+                        dlog!("config", "tmp write_all failed: {}", e);
+                        format!("Cannot write config: {}", e)
+                    })?;
+                dlog!("config", "Wrote {} bytes to tmp", content.len());
+                match file.sync_all() {
+                    Ok(_) => dlog!("config", "fsync OK"),
+                    Err(e) => dlog!("config", "fsync failed (non-fatal): {}", e),
+                }
+            }
+            dlog!("config", "Renaming tmp -> {}", path.display());
+            std::fs::rename(&tmp, &path)
+                .map_err(|e| {
+                    dlog!("config", "rename tmp->path failed: {}", e);
+                    format!("Cannot finalize config: {}", e)
+                })?;
+        }
+        #[cfg(not(unix))]
+        {
+            dlog!("config", "Writing (non-unix): {}", path.display());
+            std::fs::write(&path, &content)
+                .map_err(|e| {
+                    dlog!("config", "write failed: {}", e);
+                    format!("Cannot write config: {}", e)
+                })?;
         }
 
         dlog!("config", "Config saved to {}", path.display());

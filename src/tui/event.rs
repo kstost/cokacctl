@@ -120,7 +120,10 @@ fn handle_token_input_key(app: &mut App, key: KeyEvent) -> bool {
                 config.tokens.len(),
                 config.active_tokens().len(),
                 config.disabled_tokens.len());
-            config.save().ok();
+            if let Err(e) = config.save() {
+                app.set_status(&format!("Failed to save tokens: {}", e), true);
+                return true;
+            }
 
             app.token_input.clear();
             app.token_list.clear();
@@ -329,19 +332,25 @@ fn handle_log_key(app: &mut App, key: KeyEvent) -> bool {
             return false;
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            app.log_scroll_offset = app.log_scroll_offset.saturating_add(1);
+            app.log_scroll_offset = app
+                .log_scroll_offset
+                .saturating_add(1)
+                .min(app.max_log_scroll_offset());
         }
         KeyCode::Down | KeyCode::Char('j') => {
             app.log_scroll_offset = app.log_scroll_offset.saturating_sub(1);
         }
         KeyCode::PageUp => {
-            app.log_scroll_offset = app.log_scroll_offset.saturating_add(20);
+            app.log_scroll_offset = app
+                .log_scroll_offset
+                .saturating_add(20)
+                .min(app.max_log_scroll_offset());
         }
         KeyCode::PageDown => {
             app.log_scroll_offset = app.log_scroll_offset.saturating_sub(20);
         }
         KeyCode::Home => {
-            app.log_scroll_offset = app.log_lines.len();
+            app.log_scroll_offset = app.max_log_scroll_offset();
         }
         KeyCode::End => {
             app.log_scroll_offset = 0;
@@ -377,19 +386,41 @@ fn action_start(app: &mut App) {
     app.service_busy = true;
     app.service_busy_label = "Starting".to_string();
     app.service_busy_tick = 0;
-    dlog!("event::action_start", "Spawning start thread...");
+    dlog!(
+        "event::action_start",
+        "Spawning start thread: binary={}, active_tokens={}",
+        binary_path.display(),
+        tokens.len()
+    );
     let (tx, rx) = std::sync::mpsc::channel();
+    let binary_for_thread = binary_path.clone();
     std::thread::spawn(move || {
+        dlog!("event::action_start", "Thread: entered");
         let mgr = service::manager();
-        if mgr.is_any_running() {
+        dlog!("event::action_start", "Thread: probing is_any_running()");
+        let any = mgr.is_any_running();
+        dlog!("event::action_start", "Thread: is_any_running = {}", any);
+        if any {
             dlog!("event::action_start", "Thread: cokacdir process found, stopping all first...");
             let stop_result = mgr.stop();
             dlog!("event::action_start", "Thread: stop result = {:?}", stop_result);
         }
-        dlog!("event::action_start", "Thread: calling mgr.start()");
-        let result = mgr.start(&binary_path, &tokens);
-        dlog!("event::action_start", "Thread: start result = {:?}", result);
+        dlog!(
+            "event::action_start",
+            "Thread: calling mgr.start(binary={}, tokens={})",
+            binary_for_thread.display(),
+            tokens.len()
+        );
+        let start_t0 = std::time::Instant::now();
+        let result = mgr.start(&binary_for_thread, &tokens);
+        dlog!(
+            "event::action_start",
+            "Thread: start returned in {:?}, result = {:?}",
+            start_t0.elapsed(),
+            result
+        );
         tx.send(result).ok();
+        dlog!("event::action_start", "Thread: result dispatched, exiting");
     });
     app.service_action_rx = Some(rx);
 }

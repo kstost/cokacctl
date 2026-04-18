@@ -1,11 +1,11 @@
 [package]
 name = "cokacctl"
-version = "1.0.22"
+version = "1.0.23"
 edition = "2021"
 authors = ["cokac <monogatree@gmail.com>"]
 description = "cokacdir installation and service manager"
 license = "MIT"
-repository = "https://github.com/kstost/cokacdir"
+repository = "https://github.com/kstost/cokacctl"
 
 [dependencies]
 ratatui = "0.28"

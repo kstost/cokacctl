@@ -37,6 +37,7 @@ pub struct App {
     pub config: Config,
     pub log_lines: Vec<String>,
     pub log_scroll_offset: usize,
+    pub log_viewport_height: std::cell::Cell<u16>,
     pub status_message: Option<StatusMessage>,
     pub checking_update: bool,
     pub token_input: String,
@@ -99,6 +100,7 @@ impl App {
             config,
             log_lines: Vec::new(),
             log_scroll_offset: 0,
+            log_viewport_height: std::cell::Cell::new(0),
             status_message: None,
             checking_update: true,
             token_input: String::new(),
@@ -179,6 +181,15 @@ impl App {
             self.running_token_count.unwrap_or(self.config.active_tokens().len())
         } else {
             self.config.active_tokens().len()
+        }
+    }
+
+    pub fn max_log_scroll_offset(&self) -> usize {
+        let visible = self.log_viewport_height.get() as usize;
+        if visible == 0 {
+            self.log_lines.len().saturating_sub(1)
+        } else {
+            self.log_lines.len().saturating_sub(visible)
         }
     }
 

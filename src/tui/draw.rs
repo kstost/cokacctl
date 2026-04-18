@@ -28,6 +28,13 @@ pub fn draw(f: &mut Frame, app: &App) {
             f.buffer_mut().get_mut(x, y).reset();
         }
     }
+    dlog!(
+        "draw",
+        "frame {}x{} view={:?}",
+        area.width,
+        area.height,
+        app.view
+    );
     match app.view {
         View::Welcome => draw_welcome(f, app),
         View::TokenInput => draw_token_input(f, app),
@@ -658,8 +665,9 @@ fn mask_token(token: &str) -> String {
 fn draw_log_fullscreen(f: &mut Frame, app: &App) {
     let area = f.area();
 
-    let title = if app.log_scroll_offset > 0 {
-        format!(" Logs  +{} ", app.log_scroll_offset)
+    let display_offset = app.log_scroll_offset.min(app.max_log_scroll_offset());
+    let title = if display_offset > 0 {
+        format!(" Logs  +{} ", display_offset)
     } else {
         " Logs ".to_string()
     };
@@ -684,6 +692,7 @@ fn draw_log_fullscreen(f: &mut Frame, app: &App) {
 
     let inner = block.inner(area);
     f.render_widget(block, area);
+    app.log_viewport_height.set(inner.height);
 
     if app.log_lines.is_empty() {
         let msg = Paragraph::new(Line::from(Span::styled(
@@ -694,7 +703,8 @@ fn draw_log_fullscreen(f: &mut Frame, app: &App) {
     } else {
         let visible = inner.height as usize;
         let total = app.log_lines.len();
-        let end = total.saturating_sub(app.log_scroll_offset);
+        let offset = app.log_scroll_offset.min(app.max_log_scroll_offset());
+        let end = total.saturating_sub(offset);
         let start = end.saturating_sub(visible);
         let lines: Vec<Line> = app.log_lines[start..end]
             .iter()

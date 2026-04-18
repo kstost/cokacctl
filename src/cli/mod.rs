@@ -47,7 +47,7 @@ Interactive Mode:
   cokacctl                          Launch TUI dashboard (no arguments)
 
 Notes:
-  - Tokens are persisted in ~/.cokacdir/config.json
+  - Tokens are persisted in ~/.cokacdir/cokacctl.json
   - 'start' requires tokens to be registered beforehand via 'token'
   - 'update' automatically stops and restarts the service if it was running
   - 'restart' reuses the previously registered tokens")]

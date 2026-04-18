@@ -64,12 +64,18 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
                 let target = format!("gui/{}/com.cokacdir.server", uid);
                 dlog!("uninstall", "launchctl bootout {}", target);
                 match Command::new("launchctl").args(["bootout", &target]).output() {
-                    Ok(out) if out.status.success() => {
-                        dlog!("uninstall", "launchctl bootout: OK");
-                        println!("    launchctl bootout: OK");
+                    Ok(out) => {
+                        crate::core::debug::log_output("uninstall", "launchctl bootout", &out);
+                        if out.status.success() {
+                            dlog!("uninstall", "launchctl bootout: OK");
+                            println!("    launchctl bootout: OK");
+                        } else {
+                            dlog!("uninstall", "launchctl bootout: skipped (non-success)");
+                            println!("    launchctl bootout: skipped (not running)");
+                        }
                     }
-                    _ => {
-                        dlog!("uninstall", "launchctl bootout: skipped");
+                    Err(e) => {
+                        dlog!("uninstall", "launchctl bootout exec failed: {}", e);
                         println!("    launchctl bootout: skipped (not running)");
                     }
                 }
@@ -78,6 +84,7 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
                 dlog!("uninstall", "Killing all cokacdir processes via pkill...");
                 match Command::new("pkill").arg("cokacdir").output() {
                     Ok(out) => {
+                        crate::core::debug::log_output("uninstall", "pkill cokacdir", &out);
                         dlog!("uninstall", "pkill cokacdir exit={}", out.status.code().unwrap_or(-1));
                     }
                     Err(e) => {
@@ -89,20 +96,41 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
         Os::Linux => {
             dlog!("uninstall", "systemctl --user stop cokacdir");
             match Command::new("systemctl").args(["--user", "stop", "cokacdir"]).output() {
-                Ok(out) if out.status.success() => println!("    systemctl stop: OK"),
-                _ => println!("    systemctl stop: skipped (not running)"),
+                Ok(out) => {
+                    crate::core::debug::log_output("uninstall", "systemctl --user stop cokacdir", &out);
+                    if out.status.success() {
+                        println!("    systemctl stop: OK");
+                    } else {
+                        println!("    systemctl stop: skipped (not running)");
+                    }
+                }
+                Err(e) => {
+                    dlog!("uninstall", "systemctl stop exec failed: {}", e);
+                    println!("    systemctl stop: skipped (not running)");
+                }
             }
 
             dlog!("uninstall", "systemctl --user disable cokacdir");
             match Command::new("systemctl").args(["--user", "disable", "cokacdir"]).output() {
-                Ok(out) if out.status.success() => println!("    systemctl disable: OK"),
-                _ => println!("    systemctl disable: skipped (not enabled)"),
+                Ok(out) => {
+                    crate::core::debug::log_output("uninstall", "systemctl --user disable cokacdir", &out);
+                    if out.status.success() {
+                        println!("    systemctl disable: OK");
+                    } else {
+                        println!("    systemctl disable: skipped (not enabled)");
+                    }
+                }
+                Err(e) => {
+                    dlog!("uninstall", "systemctl disable exec failed: {}", e);
+                    println!("    systemctl disable: skipped (not enabled)");
+                }
             }
 
             // Kill any externally running cokacdir processes
             dlog!("uninstall", "Killing all cokacdir processes via pkill...");
             match Command::new("pkill").arg("cokacdir").output() {
                 Ok(out) => {
+                    crate::core::debug::log_output("uninstall", "pkill cokacdir", &out);
                     dlog!("uninstall", "pkill cokacdir exit={}", out.status.code().unwrap_or(-1));
                 }
                 Err(e) => {
@@ -132,8 +160,18 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
                 cmd.args(["/Delete", "/TN", "cokacdir", "/F"]);
                 cmd.creation_flags(0x08000000);
                 match cmd.output() {
-                    Ok(out) if out.status.success() => println!("    schtasks delete: OK"),
-                    _ => println!("    schtasks delete: skipped (not registered)"),
+                    Ok(out) => {
+                        crate::core::debug::log_output("uninstall", "schtasks /Delete /TN cokacdir /F", &out);
+                        if out.status.success() {
+                            println!("    schtasks delete: OK");
+                        } else {
+                            println!("    schtasks delete: skipped (not registered)");
+                        }
+                    }
+                    Err(e) => {
+                        dlog!("uninstall", "schtasks delete exec failed: {}", e);
+                        println!("    schtasks delete: skipped (not registered)");
+                    }
                 }
 
                 dlog!("uninstall", "Killing all cokacdir* processes via PowerShell...");
@@ -171,6 +209,37 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
                     dlog!("uninstall", "Removed: {}", path.display());
                     println!("    rm {}  ...OK", path.display());
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied
+                    && os != Os::Windows =>
+                {
+                    // /usr/local/bin/cokacdir typically requires root to remove;
+                    // try sudo as a fallback so uninstall actually succeeds.
+                    dlog!("uninstall", "Permission denied for {}, retrying with sudo", path.display());
+                    let label = format!("sudo rm -f {}", path.display());
+                    let status = Command::new("sudo")
+                        .args(["rm", "-f", &path.to_string_lossy()])
+                        .status();
+                    match status {
+                        Ok(s) => {
+                            crate::core::debug::log_status("uninstall", &label, &s);
+                            if s.success() {
+                                dlog!("uninstall", "Removed via sudo: {}", path.display());
+                                println!("    rm {} (sudo)  ...OK", path.display());
+                            } else {
+                                dlog!("uninstall", "sudo rm exit {:?}: {}", s.code(), path.display());
+                                println!(
+                                    "    rm {} (sudo)  ...failed (exit {:?})",
+                                    path.display(),
+                                    s.code()
+                                );
+                            }
+                        }
+                        Err(se) => {
+                            dlog!("uninstall", "sudo rm could not run: {}", se);
+                            println!("    rm {}  ...failed ({}, sudo unavailable: {})", path.display(), e, se);
+                        }
+                    }
+                }
                 Err(e) => {
                     dlog!("uninstall", "Failed: {} ({})", path.display(), e);
                     println!("    rm {}  ...failed ({})", path.display(), e);
@@ -197,7 +266,10 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
     // Phase 3: Reload systemd to clear stale unit cache
     if os == Os::Linux {
         dlog!("uninstall", "systemctl --user daemon-reload");
-        let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).output();
+        match Command::new("systemctl").args(["--user", "daemon-reload"]).output() {
+            Ok(out) => crate::core::debug::log_output("uninstall", "systemctl --user daemon-reload", &out),
+            Err(e) => dlog!("uninstall", "daemon-reload exec failed: {}", e),
+        }
     }
 
     println!();

@@ -29,14 +29,18 @@ fi
 echo "탐지된 LLVM 버전: ${LLVM_VERSION}"
 
 apt update
-apt install -y clang lld llvm "clang-tools-${LLVM_VERSION}"
+apt install -y clang lld llvm
+if ! apt install -y "clang-tools-${LLVM_VERSION}"; then
+    echo "경고: clang-tools-${LLVM_VERSION} 을 찾을 수 없음, clang-tools 시도..."
+    apt install -y clang-tools || echo "경고: clang-tools 설치 실패 (clang-cl 미설치 가능성)"
+fi
 
 # 버전 없는 심볼릭 링크 생성 (cargo-xwin이 필요로 함)
 for tool in llvm-lib llvm-dlltool llvm-rc clang-cl; do
-    if [ -f "/usr/bin/${tool}-${LLVM_VERSION}" ] && [ ! -f "/usr/bin/${tool}" ]; then
+    if [ -f "/usr/bin/${tool}-${LLVM_VERSION}" ] && [ ! -e "/usr/bin/${tool}" ] && [ ! -L "/usr/bin/${tool}" ]; then
         ln -s "${tool}-${LLVM_VERSION}" "/usr/bin/${tool}"
         echo "심볼릭 링크 생성: ${tool} → ${tool}-${LLVM_VERSION}"
-    elif [ -f "/usr/bin/${tool}" ]; then
+    elif [ -e "/usr/bin/${tool}" ] || [ -L "/usr/bin/${tool}" ]; then
         echo "이미 존재: /usr/bin/${tool}"
     else
         echo "경고: /usr/bin/${tool}-${LLVM_VERSION} 을 찾을 수 없습니다"

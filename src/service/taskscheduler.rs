@@ -132,11 +132,23 @@ impl TaskSchedulerManager {
     }
 
     fn powershell(script: &str) -> Result<std::process::Output, String> {
-        dlog!("taskscheduler", "PowerShell: {}", script);
-        Self::cmd("powershell")
+        dlog!("taskscheduler", "PowerShell invoke: {}", script);
+        let started = std::time::Instant::now();
+        let result = Self::cmd("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
             .output()
-            .map_err(|e| format!("PowerShell execution failed: {}", e))
+            .map_err(|e| format!("PowerShell execution failed: {}", e));
+        match &result {
+            Ok(out) => {
+                crate::core::debug::log_output(
+                    "taskscheduler",
+                    &format!("powershell (elapsed={:?})", started.elapsed()),
+                    out,
+                );
+            }
+            Err(e) => dlog!("taskscheduler", "PowerShell exec failed: {}", e),
+        }
+        result
     }
 
     fn service_state(&self, binary_path: &Path, tokens: &[String]) -> WindowsServiceState {
@@ -225,6 +237,13 @@ impl TaskSchedulerManager {
             }
         }
         self.ops_append_raw(&out);
+        // Mirror to the debug log so operators don't need to pull two files.
+        // Body may be multi-line; dlog handles that fine.
+        if body.is_empty() {
+            dlog!("taskscheduler", "[block] {}: <empty>", header);
+        } else {
+            dlog!("taskscheduler", "[block] {}:\n{}", header, body);
+        }
     }
 
     fn ops_log_section(&self, op: &str, context: &str) {
@@ -523,7 +542,10 @@ impl TaskSchedulerManager {
     }
 
     fn read_error_log_tail(&self, lines: usize) -> String {
-        let content = std::fs::read_to_string(&self.paths.error_log_file).unwrap_or_default();
+        // Lossy decode so non-UTF8 bytes (e.g. CP949 from cmd.exe) don't
+        // swallow the diagnostic output.
+        let bytes = std::fs::read(&self.paths.error_log_file).unwrap_or_default();
+        let content = String::from_utf8_lossy(&bytes);
         content
             .lines()
             .rev()
@@ -784,6 +806,7 @@ impl TaskSchedulerManager {
         dlog!("taskscheduler", "is_cokacdir_running: checking tasklist...");
         match Self::cmd("tasklist").args(["/FO", "CSV", "/NH"]).output() {
             Ok(output) => {
+                crate::core::debug::log_output("taskscheduler", "tasklist /FO CSV /NH", &output);
                 let stdout = decode_output(&output.stdout);
                 let matching: Vec<&str> = stdout
                     .lines()

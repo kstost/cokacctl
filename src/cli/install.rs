@@ -11,6 +11,25 @@ fn send(tx: &Option<ProgressTx>, msg: String) {
     }
 }
 
+/// Best-effort service restart when an install step failed after the service
+/// was stopped — keeps the user from ending up with a silently-down service.
+/// Uses whatever binary is currently findable (old binary on plain failure,
+/// or restored-from-.old binary on partial replacement).
+fn try_restart_existing(tx: &Option<ProgressTx>) {
+    let config = crate::core::config::Config::load();
+    let tokens = config.active_tokens();
+    if tokens.is_empty() {
+        return;
+    }
+    if let Some(existing) = platform::find_cokacdir() {
+        dlog!("install", "Rollback: restarting with {}", existing.display());
+        send(tx, "  Install failed — restarting service with existing binary...".into());
+        let _ = crate::service::manager().start(&existing, &tokens);
+    } else {
+        dlog!("install", "Rollback: no existing binary found, cannot restart");
+    }
+}
+
 /// CLI entry point (prints to stdout).
 pub async fn run() -> Result<(), String> {
     dlog!("install", "CLI run()");
@@ -70,7 +89,12 @@ async fn run_inner(tx: &Option<ProgressTx>) -> Result<(), String> {
     };
 
     dlog!("install", "Downloading to: {}", dest.display());
-    download::download_to_path(&url, &dest, tx).await?;
+    if let Err(e) = download::download_to_path(&url, &dest, tx).await {
+        if was_running {
+            try_restart_existing(tx);
+        }
+        return Err(e);
+    }
 
     // Setup shell wrapper on Unix
     if os != platform::Os::Windows {
@@ -98,16 +122,41 @@ async fn run_inner(tx: &Option<ProgressTx>) -> Result<(), String> {
 async fn install_with_sudo(url: &str, dest: &std::path::Path, was_running: bool, tx: &Option<ProgressTx>) -> Result<(), String> {
     dlog!("install", "install_with_sudo()");
     let tmp = std::env::temp_dir().join(format!("cokacdir_dl_{}", std::process::id()));
-    download::download_to_path(url, &tmp, tx).await?;
+    if let Err(e) = download::download_to_path(url, &tmp, tx).await {
+        if was_running {
+            try_restart_existing(tx);
+        }
+        return Err(e);
+    }
 
     let mut cmd = std::process::Command::new("sudo");
     if tx.is_some() {
         cmd.arg("-n");
     }
-    let status = cmd
+    let sudo_label = format!(
+        "sudo{} mv {} {}",
+        if tx.is_some() { " -n" } else { "" },
+        tmp.display(),
+        dest.display()
+    );
+    dlog!("install", "Invoking: {}", sudo_label);
+    let status = match cmd
         .args(["mv", &tmp.to_string_lossy(), &dest.to_string_lossy()])
         .status()
-        .map_err(|e| format!("sudo mv failed: {}", e))?;
+    {
+        Ok(s) => {
+            crate::core::debug::log_status("install", &sudo_label, &s);
+            s
+        }
+        Err(e) => {
+            dlog!("install", "sudo mv exec failed: {}", e);
+            std::fs::remove_file(&tmp).ok();
+            if was_running {
+                try_restart_existing(tx);
+            }
+            return Err(format!("sudo mv failed: {}", e));
+        }
+    };
 
     let actual_path = if !status.success() {
         let fallback = platform::fallback_install_path();
@@ -116,9 +165,15 @@ async fn install_with_sudo(url: &str, dest: &std::path::Path, was_running: bool,
         if let Some(parent) = fallback.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        std::fs::rename(&tmp, &fallback).or_else(|_| {
+        if let Err(e) = std::fs::rename(&tmp, &fallback).or_else(|_| -> Result<(), String> {
             std::fs::copy(&tmp, &fallback).map(|_| ()).map_err(|e| format!("Copy failed: {}", e))
-        })?;
+        }) {
+            std::fs::remove_file(&tmp).ok();
+            if was_running {
+                try_restart_existing(tx);
+            }
+            return Err(e);
+        }
         std::fs::remove_file(&tmp).ok();
         send(tx, format!("  cokacdir installed at {}", fallback.display()));
         send(tx, format!("  Note: Ensure {} is in your PATH", fallback.parent().unwrap_or(std::path::Path::new("~/.local/bin")).display()));

@@ -40,23 +40,30 @@ impl SystemdManager {
     }
 
     fn systemd_version() -> u32 {
+        dlog!("systemd", "systemd_version(): invoking systemctl --version");
         let output = Command::new("systemctl")
             .arg("--version")
             .output()
             .ok();
         match output {
-            Some(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let ver = stdout
-                    .lines()
-                    .next()
-                    .and_then(|line| {
-                        line.split_whitespace()
-                            .find_map(|w| w.parse::<u32>().ok())
-                    })
-                    .unwrap_or(0);
-                dlog!("systemd", "systemd version: {}", ver);
-                ver
+            Some(out) => {
+                crate::core::debug::log_output("systemd", "systemctl --version", &out);
+                if out.status.success() {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let ver = stdout
+                        .lines()
+                        .next()
+                        .and_then(|line| {
+                            line.split_whitespace()
+                                .find_map(|w| w.parse::<u32>().ok())
+                        })
+                        .unwrap_or(0);
+                    dlog!("systemd", "systemd version: {}", ver);
+                    ver
+                } else {
+                    dlog!("systemd", "systemctl --version returned non-success");
+                    0
+                }
             }
             _ => {
                 dlog!("systemd", "Failed to detect systemd version");
@@ -112,49 +119,151 @@ impl SystemdManager {
 impl ServiceManager for SystemdManager {
     fn start(&self, binary_path: &Path, tokens: &[String]) -> Result<(), String> {
         dlog!("systemd", "start() called - binary: {}, tokens: {}", binary_path.display(), tokens.len());
+        dlog!("systemd", "paths: log_dir={}, wrapper={}, service={}, log_file={}",
+            self.paths.log_dir.display(),
+            self.paths.wrapper_script.display(),
+            self.paths.service_file.display(),
+            self.paths.log_file.display());
 
-        if Command::new("systemctl").arg("--version").output().is_err() {
-            dlog!("systemd", "systemctl not found");
-            return Err("systemctl not found. This tool requires systemd.".into());
+        // Pre-flight: verify binary exists and is executable so we fail early
+        // with a clear message instead of relying on systemd's error reporting.
+        match std::fs::metadata(binary_path) {
+            Ok(m) => dlog!("systemd", "binary metadata: is_file={}, len={}B, readonly={}",
+                m.is_file(), m.len(), m.permissions().readonly()),
+            Err(e) => dlog!("systemd", "binary metadata probe failed: {}", e),
         }
 
-        dlog!("systemd", "Creating directories...");
+        dlog!("systemd", "start(): probing for systemctl binary");
+        match Command::new("systemctl").arg("--version").output() {
+            Ok(out) => {
+                crate::core::debug::log_output("systemd", "systemctl --version (probe)", &out);
+            }
+            Err(e) => {
+                dlog!("systemd", "systemctl not found: {}", e);
+                return Err("systemctl not found. This tool requires systemd.".into());
+            }
+        }
+
+        dlog!("systemd", "Creating log dir: {}", self.paths.log_dir.display());
         std::fs::create_dir_all(&self.paths.log_dir)
-            .map_err(|e| format!("Cannot create log dir: {}", e))?;
+            .map_err(|e| {
+                dlog!("systemd", "create_dir_all(log_dir) failed: {}", e);
+                format!("Cannot create log dir: {}", e)
+            })?;
+        dlog!("systemd", "log dir ready");
         if let Some(parent) = self.paths.service_file.parent() {
+            dlog!("systemd", "Creating systemd unit dir: {}", parent.display());
             std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Cannot create systemd dir: {}", e))?;
+                .map_err(|e| {
+                    dlog!("systemd", "create_dir_all(unit) failed: {}", e);
+                    format!("Cannot create systemd dir: {}", e)
+                })?;
+            dlog!("systemd", "systemd unit dir ready");
         }
 
         let wrapper = Self::generate_wrapper(binary_path, tokens);
+        dlog!("systemd", "wrapper generated: {} bytes", wrapper.len());
         dlog!("systemd", "Writing wrapper to: {}", self.paths.wrapper_script.display());
-        std::fs::write(&self.paths.wrapper_script, &wrapper)
-            .map_err(|e| format!("Cannot write wrapper: {}", e))?;
+        // Write via tmp + rename with mode 0o700 applied at creation so tokens
+        // are never visible under the default umask (0644).
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                &self.paths.wrapper_script,
-                std::fs::Permissions::from_mode(0o700),
-            )
-            .ok();
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let tmp = self.paths.wrapper_script.with_extension("sh.tmp");
+            dlog!("systemd", "wrapper tmp: {}", tmp.display());
+            match std::fs::remove_file(&tmp) {
+                Ok(_) => dlog!("systemd", "wrapper tmp: cleared stale"),
+                Err(e) => dlog!("systemd", "wrapper tmp cleanup: {} (ok if nonexistent)", e),
+            }
+            {
+                let mut file = std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .mode(0o700)
+                    .open(&tmp)
+                    .map_err(|e| {
+                        dlog!("systemd", "wrapper tmp open(0o700) failed: {}", e);
+                        format!("Cannot create wrapper temp: {}", e)
+                    })?;
+                dlog!("systemd", "wrapper tmp opened (mode 0o700)");
+                file.write_all(wrapper.as_bytes())
+                    .map_err(|e| {
+                        dlog!("systemd", "wrapper tmp write_all failed: {}", e);
+                        format!("Cannot write wrapper: {}", e)
+                    })?;
+                dlog!("systemd", "wrapper tmp: wrote {} bytes", wrapper.len());
+                match file.sync_all() {
+                    Ok(_) => dlog!("systemd", "wrapper tmp fsync OK"),
+                    Err(e) => dlog!("systemd", "wrapper tmp fsync failed (non-fatal): {}", e),
+                }
+            }
+            dlog!("systemd", "wrapper tmp -> final rename");
+            std::fs::rename(&tmp, &self.paths.wrapper_script)
+                .map_err(|e| {
+                    dlog!("systemd", "wrapper rename failed: {}", e);
+                    format!("Cannot finalize wrapper: {}", e)
+                })?;
+            dlog!("systemd", "wrapper ready at {}", self.paths.wrapper_script.display());
+        }
+        // Fallback path for non-Unix targets — systemd manager isn't actually
+        // selected on these platforms, but the module still has to compile.
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&self.paths.wrapper_script, &wrapper)
+                .map_err(|e| format!("Cannot write wrapper: {}", e))?;
         }
 
         dlog!("systemd", "Stopping existing service...");
         let _ = self.stop();
 
         let service = self.generate_service();
+        dlog!("systemd", "service unit generated: {} bytes", service.len());
         dlog!("systemd", "Writing service file to: {}", self.paths.service_file.display());
-        std::fs::write(&self.paths.service_file, &service)
-            .map_err(|e| format!("Cannot write service file: {}", e))?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                &self.paths.service_file,
-                std::fs::Permissions::from_mode(0o600),
-            )
-            .ok();
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let tmp = self.paths.service_file.with_extension("service.tmp");
+            dlog!("systemd", "service tmp: {}", tmp.display());
+            match std::fs::remove_file(&tmp) {
+                Ok(_) => dlog!("systemd", "service tmp: cleared stale"),
+                Err(e) => dlog!("systemd", "service tmp cleanup: {} (ok if nonexistent)", e),
+            }
+            {
+                let mut file = std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .mode(0o600)
+                    .open(&tmp)
+                    .map_err(|e| {
+                        dlog!("systemd", "service tmp open(0o600) failed: {}", e);
+                        format!("Cannot create service temp: {}", e)
+                    })?;
+                dlog!("systemd", "service tmp opened (mode 0o600)");
+                file.write_all(service.as_bytes())
+                    .map_err(|e| {
+                        dlog!("systemd", "service tmp write_all failed: {}", e);
+                        format!("Cannot write service file: {}", e)
+                    })?;
+                dlog!("systemd", "service tmp: wrote {} bytes", service.len());
+                match file.sync_all() {
+                    Ok(_) => dlog!("systemd", "service tmp fsync OK"),
+                    Err(e) => dlog!("systemd", "service tmp fsync failed (non-fatal): {}", e),
+                }
+            }
+            dlog!("systemd", "service tmp -> final rename");
+            std::fs::rename(&tmp, &self.paths.service_file)
+                .map_err(|e| {
+                    dlog!("systemd", "service rename failed: {}", e);
+                    format!("Cannot finalize service file: {}", e)
+                })?;
+            dlog!("systemd", "service file ready at {}", self.paths.service_file.display());
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&self.paths.service_file, &service)
+                .map_err(|e| format!("Cannot write service file: {}", e))?;
         }
 
         dlog!("systemd", "Running daemon-reload...");
@@ -162,6 +271,7 @@ impl ServiceManager for SystemdManager {
             .args(["--user", "daemon-reload"])
             .output()
             .map_err(|e| format!("daemon-reload failed: {}", e))?;
+        crate::core::debug::log_output("systemd", "systemctl --user daemon-reload", &r);
         if !r.status.success() {
             dlog!("systemd", "daemon-reload failed");
             return Err("systemctl daemon-reload failed".into());
@@ -172,6 +282,7 @@ impl ServiceManager for SystemdManager {
             .args(["--user", "enable", SERVICE_NAME])
             .output()
             .map_err(|e| format!("enable failed: {}", e))?;
+        crate::core::debug::log_output("systemd", "systemctl --user enable cokacdir", &r);
         if !r.status.success() {
             dlog!("systemd", "enable failed");
             return Err("systemctl enable failed".into());
@@ -179,6 +290,7 @@ impl ServiceManager for SystemdManager {
 
         // Truncate error log before starting so we only capture fresh errors
         let error_log_path = self.paths.log_dir.join("cokacdir.error.log");
+        dlog!("systemd", "Truncating error log: {}", error_log_path.display());
         let _ = std::fs::File::create(&error_log_path);
 
         dlog!("systemd", "Restarting service...");
@@ -186,6 +298,7 @@ impl ServiceManager for SystemdManager {
             .args(["--user", "restart", SERVICE_NAME])
             .output()
             .map_err(|e| format!("restart failed: {}", e))?;
+        crate::core::debug::log_output("systemd", "systemctl --user restart cokacdir", &r);
         if !r.status.success() {
             dlog!("systemd", "restart failed");
             return Err("systemctl restart failed".into());
@@ -193,20 +306,52 @@ impl ServiceManager for SystemdManager {
 
         if let Some(user) = std::env::var("USER").ok() {
             dlog!("systemd", "Enabling linger for user: {}", user);
-            let _ = Command::new("loginctl")
+            match Command::new("loginctl")
                 .args(["enable-linger", &user])
-                .output();
+                .output()
+            {
+                Ok(out) => crate::core::debug::log_output("systemd", "loginctl enable-linger", &out),
+                Err(e) => dlog!("systemd", "loginctl enable-linger exec failed: {}", e),
+            }
+        } else {
+            dlog!("systemd", "USER env var not set; skipping loginctl enable-linger");
         }
 
         // Check if service actually stays running
+        dlog!("systemd", "Sleeping 2000ms for service to stabilize...");
         std::thread::sleep(std::time::Duration::from_millis(2000));
+        dlog!("systemd", "Querying post-start status...");
         let status = self.status();
+        dlog!("systemd", "post-start status = {:?}", status);
         if status != ServiceStatus::Running {
-            let err_output = std::fs::read_to_string(&error_log_path).unwrap_or_default();
+            // Lossy decode so non-UTF8 bytes in the error log don't wipe out
+            // the diagnostic message shown to the user.
+            dlog!("systemd", "Reading error log for diagnostics: {}", error_log_path.display());
+            let err_bytes = std::fs::read(&error_log_path).unwrap_or_else(|e| {
+                dlog!("systemd", "error log read failed: {}", e);
+                Vec::new()
+            });
+            dlog!("systemd", "error log size: {}B", err_bytes.len());
+            let err_output = String::from_utf8_lossy(&err_bytes);
             let tail: String = err_output.lines().rev().take(10)
                 .collect::<Vec<_>>().into_iter().rev()
                 .collect::<Vec<_>>().join("\n");
-            dlog!("systemd", "Service not running after restart. Error log: '{}'", tail.trim());
+            dlog!("systemd", "Service not running after restart. Error log tail:\n{}", tail.trim());
+            // Also capture systemd's own view of the failed unit for root cause.
+            match Command::new("systemctl")
+                .args(["--user", "status", SERVICE_NAME, "--no-pager", "--lines=30"])
+                .output()
+            {
+                Ok(out) => crate::core::debug::log_output("systemd", "systemctl --user status cokacdir (post-fail)", &out),
+                Err(e) => dlog!("systemd", "post-fail status query exec failed: {}", e),
+            }
+            match Command::new("journalctl")
+                .args(["--user", "-u", SERVICE_NAME, "-n", "30", "--no-pager"])
+                .output()
+            {
+                Ok(out) => crate::core::debug::log_output("systemd", "journalctl --user -u cokacdir -n 30 (post-fail)", &out),
+                Err(e) => dlog!("systemd", "post-fail journalctl exec failed: {}", e),
+            }
             if !tail.trim().is_empty() {
                 return Err(tail.trim().to_string());
             }
@@ -220,33 +365,43 @@ impl ServiceManager for SystemdManager {
     fn stop(&self) -> Result<(), String> {
         dlog!("systemd", "stop() called");
         let mut service_err: Option<String> = None;
-        match Command::new("systemctl")
-            .args(["--user", "stop", SERVICE_NAME])
-            .output()
-        {
-            Ok(r) => {
-                if !r.status.success() {
-                    let stderr = String::from_utf8_lossy(&r.stderr);
-                    if !stderr.contains("not loaded") && !stderr.contains("not found") {
-                        dlog!("systemd", "stop() failed: {}", stderr);
-                        service_err = Some(format!("systemctl stop failed: {}", stderr));
+        // Only attempt `systemctl stop` when the unit file exists. This avoids
+        // depending on locale-specific stderr ("not loaded"/"not found") text
+        // to distinguish "already absent" from real failures.
+        if self.paths.service_file.exists() {
+            match Command::new("systemctl")
+                .args(["--user", "stop", SERVICE_NAME])
+                .output()
+            {
+                Ok(r) => {
+                    crate::core::debug::log_output("systemd", "systemctl --user stop cokacdir", &r);
+                    if !r.status.success() {
+                        // systemd exit code 5 == "unit not loaded"; treat as benign.
+                        if r.status.code() == Some(5) {
+                            dlog!("systemd", "stop(): unit not loaded (exit 5)");
+                        } else {
+                            let stderr = String::from_utf8_lossy(&r.stderr);
+                            dlog!("systemd", "stop() failed: {}", stderr);
+                            service_err = Some(format!("systemctl stop failed: {}", stderr.trim()));
+                        }
                     } else {
-                        dlog!("systemd", "stop(): service was not loaded");
+                        dlog!("systemd", "stop() success");
                     }
-                } else {
-                    dlog!("systemd", "stop() success");
+                }
+                Err(e) => {
+                    dlog!("systemd", "stop(): systemctl exec failed: {}", e);
+                    service_err = Some(format!("stop failed: {}", e));
                 }
             }
-            Err(e) => {
-                dlog!("systemd", "stop(): systemctl exec failed: {}", e);
-                service_err = Some(format!("stop failed: {}", e));
-            }
+        } else {
+            dlog!("systemd", "stop(): service file absent, skipping systemctl stop");
         }
 
         // Always kill externally running cokacdir processes regardless of service stop result
         dlog!("systemd", "stop(): killing external cokacdir processes via pkill...");
         match Command::new("pkill").arg("cokacdir").output() {
             Ok(out) => {
+                crate::core::debug::log_output("systemd", "pkill cokacdir", &out);
                 dlog!("systemd", "stop(): pkill exit={} (0=killed, 1=none found)", out.status.code().unwrap_or(-1));
             }
             Err(e) => {
@@ -263,21 +418,39 @@ impl ServiceManager for SystemdManager {
     fn remove(&self) -> Result<(), String> {
         dlog!("systemd", "remove() called");
         let _ = self.stop();
-        let _ = Command::new("systemctl")
+        dlog!("systemd", "remove(): disabling service");
+        match Command::new("systemctl")
             .args(["--user", "disable", SERVICE_NAME])
-            .output();
+            .output()
+        {
+            Ok(out) => crate::core::debug::log_output("systemd", "systemctl --user disable cokacdir", &out),
+            Err(e) => dlog!("systemd", "remove(): disable exec failed: {}", e),
+        }
         if self.paths.service_file.exists() {
             dlog!("systemd", "Removing service file: {}", self.paths.service_file.display());
             std::fs::remove_file(&self.paths.service_file)
                 .map_err(|e| format!("Cannot remove service file: {}", e))?;
+            dlog!("systemd", "Removed service file");
+        } else {
+            dlog!("systemd", "Service file already absent: {}", self.paths.service_file.display());
         }
         if self.paths.wrapper_script.exists() {
             dlog!("systemd", "Removing wrapper: {}", self.paths.wrapper_script.display());
-            std::fs::remove_file(&self.paths.wrapper_script).ok();
+            match std::fs::remove_file(&self.paths.wrapper_script) {
+                Ok(_) => dlog!("systemd", "Removed wrapper script"),
+                Err(e) => dlog!("systemd", "Failed to remove wrapper: {}", e),
+            }
+        } else {
+            dlog!("systemd", "Wrapper script already absent: {}", self.paths.wrapper_script.display());
         }
-        let _ = Command::new("systemctl")
+        dlog!("systemd", "remove(): running daemon-reload");
+        match Command::new("systemctl")
             .args(["--user", "daemon-reload"])
-            .output();
+            .output()
+        {
+            Ok(out) => crate::core::debug::log_output("systemd", "systemctl --user daemon-reload (remove)", &out),
+            Err(e) => dlog!("systemd", "remove(): daemon-reload exec failed: {}", e),
+        }
         dlog!("systemd", "remove() complete");
         Ok(())
     }
@@ -293,6 +466,7 @@ impl ServiceManager for SystemdManager {
             .output();
         match output {
             Ok(out) => {
+                crate::core::debug::log_output("systemd", "systemctl --user is-active cokacdir", &out);
                 let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 dlog!("systemd", "status(): systemctl is-active = '{}'", state);
                 match state.as_str() {
@@ -312,6 +486,7 @@ impl ServiceManager for SystemdManager {
         dlog!("systemd", "is_any_running(): checking pgrep cokacdir...");
         match Command::new("pgrep").arg("cokacdir").output() {
             Ok(output) => {
+                crate::core::debug::log_output("systemd", "pgrep cokacdir", &output);
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let pids = stdout.trim();
                 let found = output.status.success();
