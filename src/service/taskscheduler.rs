@@ -189,56 +189,16 @@ impl TaskSchedulerManager {
     }
 
     // ------------------------------------------------------------------
-    // Operation log (~/.cokacdir/logs/cokacctl.log)
-    //
-    // Records every step of service operations — PowerShell scripts sent,
-    // exit codes, stdout, stderr, task state snapshots, environment info.
-    // Never truncated; sessions are separated by headers.
+    // Operation log helpers — route all Task Scheduler forensic output
+    // (PowerShell scripts, exit codes, task/process snapshots, section
+    // markers) through the single debug log so `--debug` controls everything.
     // ------------------------------------------------------------------
 
-    fn ops_log_path(&self) -> PathBuf {
-        self.paths.log_dir.join("cokacctl.log")
-    }
-
-    fn ops_now() -> String {
-        chrono::Local::now()
-            .format("%Y-%m-%d %H:%M:%S%.3f")
-            .to_string()
-    }
-
-    fn ops_append_raw(&self, s: &str) {
-        let _ = std::fs::create_dir_all(&self.paths.log_dir);
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.ops_log_path())
-        {
-            use std::io::Write;
-            let _ = f.write_all(s.as_bytes());
-            let _ = f.flush();
-        }
-    }
-
     fn ops_log(&self, msg: &str) {
-        let line = format!("[{}] {}\n", Self::ops_now(), msg);
-        self.ops_append_raw(&line);
         dlog!("taskscheduler", "{}", msg);
     }
 
     fn ops_log_block(&self, header: &str, body: &str) {
-        let mut out = format!("[{}] {}\n", Self::ops_now(), header);
-        if body.is_empty() {
-            out.push_str("    <empty>\n");
-        } else {
-            for line in body.lines() {
-                out.push_str("    ");
-                out.push_str(line);
-                out.push('\n');
-            }
-        }
-        self.ops_append_raw(&out);
-        // Mirror to the debug log so operators don't need to pull two files.
-        // Body may be multi-line; dlog handles that fine.
         if body.is_empty() {
             dlog!("taskscheduler", "[block] {}: <empty>", header);
         } else {
@@ -249,25 +209,25 @@ impl TaskSchedulerManager {
     fn ops_log_section(&self, op: &str, context: &str) {
         let sep = "=".repeat(72);
         let mut body = String::new();
-        body.push('\n');
         body.push_str(&sep);
         body.push('\n');
-        body.push_str(&format!("[{}] BEGIN {}\n", Self::ops_now(), op));
+        body.push_str(&format!("BEGIN {}", op));
         if !context.is_empty() {
+            body.push('\n');
             for line in context.lines() {
                 body.push_str("    ");
                 body.push_str(line);
                 body.push('\n');
             }
+        } else {
+            body.push('\n');
         }
         body.push_str(&sep);
-        body.push('\n');
-        self.ops_append_raw(&body);
+        dlog!("taskscheduler", "{}", body);
     }
 
     fn ops_log_section_end(&self, op: &str, result: &str) {
-        let body = format!("[{}] END {}: {}\n", Self::ops_now(), op, result);
-        self.ops_append_raw(&body);
+        dlog!("taskscheduler", "END {}: {}", op, result);
     }
 
     fn format_ps_execution(
@@ -865,7 +825,6 @@ impl ServiceManager for TaskSchedulerManager {
                  log_file: {}\n\
                  error_log_file: {}\n\
                  state_file: {}\n\
-                 ops_log_file: {}\n\
                  task_name: {}\n\
                  cokacctl_version: {}",
                 binary_path.display(),
@@ -875,7 +834,6 @@ impl ServiceManager for TaskSchedulerManager {
                 self.paths.log_file.display(),
                 self.paths.error_log_file.display(),
                 self.paths.state_file.display(),
-                self.ops_log_path().display(),
                 TASK_NAME,
                 env!("CARGO_PKG_VERSION"),
             ),
