@@ -38,12 +38,14 @@ pub struct SharedState {
     auth_token: Arc<Option<String>>,
     /// Tracks whether the current bind is reachable from the network.
     inbound: bool,
-    /// Lowercased `host:port` authorities this server will answer to. Every
-    /// request's `Host` header is checked against this list to neutralize DNS
-    /// rebinding: an attacker can set an external hostname's DNS to resolve
-    /// to 127.0.0.1 and trick a victim's browser into issuing requests to our
-    /// loopback port, but the browser still sends the attacker's hostname in
-    /// the `Host` header. Rejecting unknown Host cuts that path off.
+    /// Lowercased `host:port` authorities the server will answer to in
+    /// loopback mode. Every request's `Host` header is checked against this
+    /// list to neutralize DNS rebinding: an attacker can set an external
+    /// hostname's DNS to resolve to 127.0.0.1 and trick a victim's browser
+    /// into issuing requests to our loopback port, but the browser still
+    /// sends the attacker's hostname in the `Host` header. Rejecting unknown
+    /// Host cuts that path off. Empty in inbound mode — see `host_allowed`
+    /// for why the check is disabled there.
     allowed_hosts: Arc<Vec<String>>,
     /// Serializes config load→mutate→save cycles so concurrent dashboard
     /// requests can't lose each other's edits. `Config::save()` already does
@@ -64,13 +66,12 @@ impl SharedState {
         auth_token: Option<String>,
         inbound: bool,
         port: u16,
-        sans: &[String],
     ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner::default())),
             auth_token: Arc::new(auth_token),
             inbound,
-            allowed_hosts: Arc::new(build_allowed_hosts(inbound, port, sans)),
+            allowed_hosts: Arc::new(build_allowed_hosts(inbound, port)),
             config_lock: Arc::new(Mutex::new(())),
             binary_op_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
@@ -83,7 +84,23 @@ impl SharedState {
     /// Returns true when the presented `Host` header names one of the
     /// authorities this server actually serves. Case-insensitive. Missing
     /// Host is treated as not-allowed (HTTP/1.1 requires it anyway).
+    ///
+    /// In inbound mode the check is disabled: the client's authority may
+    /// legitimately differ from what the server bound to (SSH port
+    /// forwarding, reverse proxy, VPN, docker network, DNS alias), and the
+    /// real defenses are elsewhere:
+    ///  * `/api/*` requires the per-session bearer token, which lives in the
+    ///    URL fragment and is never sent cross-origin — so DNS-rebinding JS
+    ///    on an attacker origin cannot obtain it.
+    ///  * Static assets carry no secrets; the JSX bundle reads the bearer
+    ///    from `location.hash` only when loaded from the legit URL.
+    ///
+    /// Loopback mode keeps the strict allowlist because `auth_token` is
+    /// `None` there — Host is the primary DNS-rebinding defense.
     pub fn host_allowed(&self, host: Option<&str>) -> bool {
+        if self.inbound {
+            return true;
+        }
         let got = match host {
             Some(h) => h.trim().to_ascii_lowercase(),
             None => return false,
@@ -169,28 +186,25 @@ impl SharedState {
     }
 }
 
-/// Builds the set of `host:port` authorities the dashboard should answer to.
+/// Builds the set of `host:port` authorities the dashboard should answer to
+/// in loopback mode. Only the three loopback names — accepting interface IPs
+/// would re-open the DNS-rebinding hole (an attacker-controlled name
+/// resolving to 127.0.0.1 would then pass the Host check).
 ///
-/// Loopback mode: only the three loopback names (no network-reachable IPs
-/// exist for this bind, and accepting interface IPs would re-open the DNS
-/// rebinding hole we're trying to close).
-///
-/// Inbound mode: the SAN list, which already enumerates localhost + every
-/// local interface IP. That's the exact set of authorities the cert is valid
-/// for, so any browser that reached us via TLS without a name-mismatch
-/// warning is sending one of these in Host.
+/// Inbound mode returns an empty list; `host_allowed` short-circuits to true
+/// there because the client's authority legitimately varies (port forward,
+/// reverse proxy, etc.) and bearer-token auth on `/api/*` is what actually
+/// blocks rebinding attacks.
 ///
 /// IPv6 literals get wrapped in brackets because HTTP Host headers use
 /// `[addr]:port` form for IPv6.
-fn build_allowed_hosts(inbound: bool, port: u16, sans: &[String]) -> Vec<String> {
-    let entries: Vec<String> = if inbound {
-        sans.to_vec()
-    } else {
-        vec!["localhost".to_string(), "127.0.0.1".to_string(), "::1".to_string()]
-    };
-    entries
+fn build_allowed_hosts(inbound: bool, port: u16) -> Vec<String> {
+    if inbound {
+        return Vec::new();
+    }
+    ["localhost", "127.0.0.1", "::1"]
         .into_iter()
-        .map(|e| format_host(&e, port).to_ascii_lowercase())
+        .map(|e| format_host(e, port).to_ascii_lowercase())
         .collect()
 }
 

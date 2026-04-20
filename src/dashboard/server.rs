@@ -117,15 +117,7 @@ pub async fn serve(port: u16, inbound: bool) -> Result<(), String> {
     } else {
         (None, None)
     };
-    // Host allowlist mirrors the authorities the server is actually reachable
-    // at — loopback names in loopback mode, or the cert's SAN list in inbound
-    // mode. A request whose Host doesn't name one of these is a DNS rebinding
-    // candidate and gets rejected before any router logic runs.
-    let san_for_hosts: Vec<String> = tls_material
-        .as_ref()
-        .map(|m| m.san_entries.clone())
-        .unwrap_or_default();
-    let state = SharedState::new(auth_token.clone(), inbound, port, &san_for_hosts);
+    let state = SharedState::new(auth_token.clone(), inbound, port);
     let acceptor = tls_material.as_ref().map(|m| TlsAcceptor::from(m.server_config.clone()));
 
     print_banner(port, inbound, auth_token.as_deref(), tls_material.as_ref());
@@ -308,14 +300,14 @@ where
 }
 
 async fn route(req: &Request, state: &SharedState) -> Response {
-    // DNS rebinding defense. The browser's Host header reflects the authority
-    // the user typed (or that an attacker's JS reached us via). The comparison
-    // against a pre-computed allowlist ensures that even if an attacker
-    // rebinds `evil.com` to 127.0.0.1 and gets a victim's browser to connect,
-    // the request arrives with `Host: evil.com:<port>` and is refused here
-    // before any auth / router logic can be abused. Without this check, the
-    // Origin-vs-Host cross-compare below would accept the rebound request
-    // because both headers carry the attacker's hostname.
+    // DNS-rebinding defense in loopback mode: reject any Host that doesn't
+    // name a loopback authority, so an attacker-controlled hostname resolving
+    // to 127.0.0.1 can't slip past the Origin-vs-Host cross-compare (both
+    // headers would carry the attacker's name and match each other).
+    // In inbound mode `host_allowed` returns true unconditionally — the
+    // client's authority legitimately varies with port forwarding / reverse
+    // proxies, and bearer-token auth on `/api/*` is what actually blocks
+    // rebinding there. See `SharedState::host_allowed` for details.
     if !state.host_allowed(req.host.as_deref()) {
         dlog!(
             "dashboard",
