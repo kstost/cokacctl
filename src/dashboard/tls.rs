@@ -13,7 +13,6 @@
 //! that defeats a TLS MITM against a self-signed deployment.
 
 use std::fs;
-use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -33,9 +32,6 @@ pub struct TlsMaterial {
     /// fingerprint format browsers display.
     pub fingerprint_sha256: String,
     pub cert_path: PathBuf,
-    /// IPs/names baked into the cert SAN. Banner uses these to suggest URLs
-    /// that won't trigger a name-mismatch warning.
-    pub san_entries: Vec<String>,
 }
 
 pub fn load_or_create() -> Result<TlsMaterial, String> {
@@ -98,7 +94,6 @@ pub fn load_or_create() -> Result<TlsMaterial, String> {
         server_config: Arc::new(config),
         fingerprint_sha256: fingerprint,
         cert_path,
-        san_entries: san,
     })
 }
 
@@ -283,15 +278,6 @@ fn build_san_entries() -> Vec<String> {
         }
     }
     out
-}
-
-/// Convenience: list the IPs from `san_entries` that look like routable
-/// (non-loopback) IPv4 addresses, for the banner suggestion.
-pub fn advertised_addresses(sans: &[String]) -> Vec<IpAddr> {
-    sans.iter()
-        .filter_map(|s| s.parse::<IpAddr>().ok())
-        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
-        .collect()
 }
 
 // ─── x509 minimal ─────────────────────────────────────────────────────────

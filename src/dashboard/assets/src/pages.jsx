@@ -2,7 +2,7 @@
 
 // ─── Overview ─────────────────────────────────────────────
 const OverviewPage = ({ state, actions }) => {
-  const { serviceStatus, cokacdirVersion, latestVersion, bots, startedAt, activity } = state;
+  const { serviceStatus, cokacdirVersion, latestVersion, bots, startedAt, activity, pendingAction } = state;
 
   const uptimeMs = startedAt ? Date.now() - startedAt.getTime() : 0;
   const pulseCls = serviceStatus === 'running' ? '' : serviceStatus === 'stopped' || serviceStatus === 'not-installed' ? 'stopped' : 'unknown';
@@ -61,21 +61,25 @@ const OverviewPage = ({ state, actions }) => {
         <div className="hero-actions">
           {serviceStatus !== 'running' ? (
             <button className="btn primary" disabled={activeBots === 0 || state.busy} onClick={() => actions.start()}>
-              <Icon name="play" size={14}/> Start service
+              {pendingAction === 'start' ? <Spinner size={14}/> : <Icon name="play" size={14}/>}
+              {pendingAction === 'start' ? 'Starting…' : 'Start service'}
             </button>
           ) : (
             <>
               <button className="btn" disabled={state.busy} onClick={() => actions.restart()}>
-                <Icon name="restart" size={14}/> Restart
+                {pendingAction === 'restart' ? <Spinner size={14}/> : <Icon name="restart" size={14}/>}
+                {pendingAction === 'restart' ? 'Restarting…' : 'Restart'}
               </button>
               <button className="btn danger" disabled={state.busy} onClick={() => actions.stop()}>
-                <Icon name="stop" size={14}/> Stop
+                {pendingAction === 'stop' ? <Spinner size={14}/> : <Icon name="stop" size={14}/>}
+                {pendingAction === 'stop' ? 'Stopping…' : 'Stop'}
               </button>
             </>
           )}
           {updateAvailable && (
             <button className="btn" disabled={state.busy} onClick={() => actions.update()}>
-              <Icon name="download" size={14}/> Update to v{latestVersion}
+              {pendingAction === 'update' ? <Spinner size={14}/> : <Icon name="download" size={14}/>}
+              {pendingAction === 'update' ? 'Updating…' : `Update to v${latestVersion}`}
             </button>
           )}
         </div>
@@ -135,7 +139,7 @@ const OverviewPage = ({ state, actions }) => {
 
 // ─── Service ─────────────────────────────────────────────
 const ServicePage = ({ state, actions }) => {
-  const { serviceStatus, platform, bots, startedAt } = state;
+  const { serviceStatus, platform, bots, startedAt, pendingAction } = state;
   const busy = state.busy || ['starting','stopping','restarting','removing'].includes(serviceStatus);
   const running = serviceStatus === 'running';
   const activeBots = bots.filter(b => !b.disabled).length;
@@ -162,7 +166,8 @@ const ServicePage = ({ state, actions }) => {
             <div className="desc">Run cokacdir with the {activeBots} active bot token(s) and register it to start automatically at boot.</div>
           </div>
           <button className="btn primary" disabled={busy || running || activeBots === 0} onClick={() => actions.start()}>
-            <Icon name="play" size={14}/> Start
+            {pendingAction === 'start' ? <Spinner size={14}/> : <Icon name="play" size={14}/>}
+            {pendingAction === 'start' ? 'Starting…' : 'Start'}
           </button>
         </div>
 
@@ -175,7 +180,8 @@ const ServicePage = ({ state, actions }) => {
             <div className="desc">Restart the service with the currently registered tokens. Run this after adding or removing tokens so changes take effect.</div>
           </div>
           <button className="btn" disabled={busy || !running} onClick={() => actions.restart()}>
-            <Icon name="restart" size={14}/> Restart
+            {pendingAction === 'restart' ? <Spinner size={14}/> : <Icon name="restart" size={14}/>}
+            {pendingAction === 'restart' ? 'Restarting…' : 'Restart'}
           </button>
         </div>
 
@@ -188,7 +194,8 @@ const ServicePage = ({ state, actions }) => {
             <div className="desc">Gracefully stop the service process. It won't auto-start on the next reboot.</div>
           </div>
           <button className="btn" disabled={busy || !running} onClick={() => actions.stop()}>
-            <Icon name="stop" size={14}/> Stop
+            {pendingAction === 'stop' ? <Spinner size={14}/> : <Icon name="stop" size={14}/>}
+            {pendingAction === 'stop' ? 'Stopping…' : 'Stop'}
           </button>
         </div>
 
@@ -201,7 +208,8 @@ const ServicePage = ({ state, actions }) => {
             <div className="desc">Fully unregister cokacdir from {platform.label}. It will be re-registered on the next start.</div>
           </div>
           <button className="btn danger" disabled={busy || serviceStatus === 'not-installed'} onClick={() => actions.remove()}>
-            <Icon name="trash" size={14}/> Remove
+            {pendingAction === 'remove' ? <Spinner size={14}/> : <Icon name="trash" size={14}/>}
+            {pendingAction === 'remove' ? 'Removing…' : 'Remove'}
           </button>
         </div>
       </div>
@@ -458,7 +466,7 @@ const LogsPage = ({ state }) => {
 
 // ─── Updates ─────────────────────────────────────────────
 const UpdatesPage = ({ state, actions }) => {
-  const { cokacctlVersion, cokacdirVersion, latestVersion, checkingUpdate, lastCheck } = state;
+  const { cokacctlVersion, cokacdirVersion, latestVersion, checkingUpdate, lastCheck, pendingAction } = state;
   const installed = cokacdirVersion;
   const updateAvailable = installed && latestVersion && installed !== latestVersion;
   const notInstalled = !installed;
@@ -514,11 +522,13 @@ const UpdatesPage = ({ state, actions }) => {
           <div className="action">
             {notInstalled ? (
               <button className="btn primary" onClick={() => actions.install()} disabled={state.busy}>
-                <Icon name="download" size={14}/> Install cokacdir
+                {pendingAction === 'install' ? <Spinner size={14}/> : <Icon name="download" size={14}/>}
+                {pendingAction === 'install' ? 'Installing…' : 'Install cokacdir'}
               </button>
             ) : updateAvailable ? (
               <button className="btn primary" onClick={() => actions.update()} disabled={state.busy}>
-                <Icon name="download" size={14}/> Update to v{latestVersion}
+                {pendingAction === 'update' ? <Spinner size={14}/> : <Icon name="download" size={14}/>}
+                {pendingAction === 'update' ? 'Updating…' : `Update to v${latestVersion}`}
               </button>
             ) : (
               <button className="btn" disabled>

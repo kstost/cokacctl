@@ -113,7 +113,14 @@ const App = () => {
   const [state, setState] = useState(null);
   const [logs, setLogs] = useState([]);
   const [activity, setActivity] = useState([]);
-  const [busy, setBusy] = useState(false);
+  // `pendingAction` carries the action key ('start', 'stop', 'restart',
+  // 'remove', 'install', 'update') of whichever long-running request is in
+  // flight, or null. Pages use it to pick which specific button shows the
+  // spinner while also disabling the rest; the simple boolean `busy` derived
+  // below preserves the old "any action running" check used as a disable
+  // guard throughout the UI.
+  const [pendingAction, setPendingAction] = useState(null);
+  const busy = pendingAction !== null;
   const [toasts, setToasts] = useState([]);
   const [authNeeded, setAuthNeeded] = useState(false);
   const [pendingToken, setPendingToken] = useState('');
@@ -172,8 +179,8 @@ const App = () => {
     return () => clearInterval(id);
   }, [page, refreshLogs]);
 
-  const runAction = useCallback(async (label, method, path, body) => {
-    setBusy(true);
+  const runAction = useCallback(async (actionKey, label, method, path, body) => {
+    setPendingAction(actionKey);
     try {
       const data = await api(method, path, body);
       toast(data?.message || `${label} done`, 'ok');
@@ -185,20 +192,20 @@ const App = () => {
       toast(`${label} failed: ${e.message}`, 'err');
       throw e;
     } finally {
-      setBusy(false);
+      setPendingAction(null);
     }
   }, [toast, refreshState, refreshActivity, refreshLogs]);
 
   const actions = useMemo(() => ({
     goto: goTo,
 
-    start:   () => runAction('Start service',    'POST', '/api/service/start').catch(()=>{}),
-    stop:    () => runAction('Stop service',     'POST', '/api/service/stop').catch(()=>{}),
-    restart: () => runAction('Restart service',  'POST', '/api/service/restart').catch(()=>{}),
-    remove:  () => runAction('Remove service',   'POST', '/api/service/remove').catch(()=>{}),
+    start:   () => runAction('start',   'Start service',    'POST', '/api/service/start').catch(()=>{}),
+    stop:    () => runAction('stop',    'Stop service',     'POST', '/api/service/stop').catch(()=>{}),
+    restart: () => runAction('restart', 'Restart service',  'POST', '/api/service/restart').catch(()=>{}),
+    remove:  () => runAction('remove',  'Remove service',   'POST', '/api/service/remove').catch(()=>{}),
 
-    install: () => runAction('Install cokacdir', 'POST', '/api/install').catch(()=>{}),
-    update:  () => runAction('Update',           'POST', '/api/update/apply').catch(()=>{}),
+    install: () => runAction('install', 'Install cokacdir', 'POST', '/api/install').catch(()=>{}),
+    update:  () => runAction('update',  'Update',           'POST', '/api/update/apply').catch(()=>{}),
 
     checkUpdate: async () => {
       try {
@@ -305,7 +312,7 @@ const App = () => {
     );
   }
 
-  const fullState = { ...state, logs, activity, busy };
+  const fullState = { ...state, logs, activity, busy, pendingAction };
   const pageEl = (() => {
     switch (page) {
       case 'overview': return <OverviewPage state={fullState} actions={actions}/>;

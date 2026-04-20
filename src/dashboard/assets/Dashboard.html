@@ -184,6 +184,18 @@
   .btn.sm { padding: 5px 9px; font-size: 12px; }
   .btn .ico { width: 14px; height: 14px; }
 
+  /* ── spinner ─────────────────────────────────────────── */
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner {
+    display: inline-block;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    flex-shrink: 0;
+    box-sizing: border-box;
+  }
+
   /* ── cards ──────────────────────────────────────────── */
   .card {
     background: var(--bg-card);

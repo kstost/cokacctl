@@ -46,6 +46,18 @@ const Metric = ({ label, value, unit, iconName, trend, trendValue, spark, sparkC
   </div>
 );
 
+// ─── Spinner ──────────────────────────────────────────────
+// Inherits currentColor so it matches whatever button/context it lives in
+// (primary buttons: dark text color, danger buttons: red, etc.).
+const Spinner = ({ size = 14 }) => (
+  <span
+    className="spinner"
+    style={{ width: size, height: size }}
+    role="status"
+    aria-label="loading"
+  />
+);
+
 // ─── Status tag ────────────────────────────────────────────
 const StatusTag = ({ status }) => {
   const map = {
@@ -97,5 +109,5 @@ const ToastZone = ({ toasts }) => (
 );
 
 Object.assign(window, {
-  Sparkline, Metric, StatusTag, LogLine, ToastZone, renderLogMsg,
+  Sparkline, Metric, Spinner, StatusTag, LogLine, ToastZone, renderLogMsg,
 });

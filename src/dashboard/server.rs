@@ -478,14 +478,15 @@ fn print_banner(port: u16, inbound: bool, auth: Option<&str>, tls: Option<&tls::
     println!("  ────────────────────────────────────────");
     if inbound {
         let secret = auth.unwrap_or("");
-        let advertised = tls
-            .map(|m| tls::advertised_addresses(&m.san_entries))
-            .unwrap_or_default();
-        let host_label = advertised
-            .first()
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|| "<this-host>".into());
-        println!("  Open: https://{}:{}/#access={}", host_label, port, secret);
+        // Always advertise `localhost` as the primary URL. Interface IPs that
+        // getifaddrs returns are often non-reachable for the user's actual
+        // remote-access case (Docker bridges, VM host-only networks, VPN
+        // tunnels, link-local) so suggesting them causes more failed clicks
+        // than successful ones. A user who genuinely wants remote access
+        // knows their own network and can substitute the hostname themselves
+        // — the cert's SAN already covers every local interface IP so any
+        // substitution that works network-wise will also pass TLS.
+        println!("  Open: https://localhost:{}/#access={}", port, secret);
         if let Some(material) = tls {
             println!();
             println!("  Cert fingerprint (SHA-256):");
@@ -493,13 +494,6 @@ fn print_banner(port: u16, inbound: bool, auth: Option<&str>, tls: Option<&tls::
                 println!("    {}", line);
             }
             println!("  Cert path: {}", material.cert_path.display());
-            if advertised.len() > 1 {
-                println!();
-                println!("  Also reachable at:");
-                for ip in &advertised[1..] {
-                    println!("    https://{}:{}/", ip, port);
-                }
-            }
         }
         println!();
         println!("  \x1b[36mFirst-visit browser warning\x1b[0m");
