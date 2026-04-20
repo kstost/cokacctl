@@ -87,6 +87,7 @@ pub fn token(tokens: Vec<String>) -> Result<(), String> {
     let mut config = Config::load();
     config.tokens = tokens.clone();
     config.disabled_tokens.clear();
+    config.token_names.retain(|t, _| tokens.contains(t));
     config.save()?;
 
     dlog!("cli::service", "Tokens saved");

@@ -1,6 +1,7 @@
 #[macro_use]
 mod core;
 mod cli;
+mod dashboard;
 mod service;
 mod tui;
 
@@ -11,6 +12,13 @@ fn main() {
     let cli = Cli::parse();
     core::debug::set_debug_enabled(cli.debug);
     dlog!("main", "=== cokacctl started (v{}) ===", env!("CARGO_PKG_VERSION"));
+
+    if cli.dashboard {
+        dlog!("main", "Dashboard mode on port {} inbound={}", cli.port, cli.inbound);
+        run_dashboard(cli.port, cli.inbound);
+        dlog!("main", "=== cokacctl exiting ===");
+        return;
+    }
 
     match cli.command {
         Some(command) => {
@@ -23,6 +31,14 @@ fn main() {
         }
     }
     dlog!("main", "=== cokacctl exiting ===");
+}
+
+fn run_dashboard(port: u16, inbound: bool) {
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+    if let Err(e) = rt.block_on(dashboard::serve(port, inbound)) {
+        eprintln!("\x1b[31m  Dashboard error: {}\x1b[0m", e);
+        std::process::exit(1);
+    }
 }
 
 fn run_cli(command: Commands) {

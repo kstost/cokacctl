@@ -14,6 +14,10 @@ pub struct Config {
     /// Path to the cokacdir binary (if custom).
     #[serde(default)]
     pub install_path: Option<String>,
+    /// Optional user-supplied display names keyed by token. Only read by the
+    /// web dashboard; the TUI and CLI don't require this.
+    #[serde(default)]
+    pub token_names: std::collections::BTreeMap<String, String>,
 }
 
 impl Config {

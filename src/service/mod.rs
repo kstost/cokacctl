@@ -25,7 +25,7 @@ impl std::fmt::Display for ServiceStatus {
 }
 
 /// Common interface for OS-specific service managers.
-pub trait ServiceManager {
+pub trait ServiceManager: Send + Sync {
     /// Register and start the service with given tokens.
     fn start(&self, binary_path: &Path, tokens: &[String]) -> Result<(), String>;
     /// Stop the service.
@@ -47,7 +47,7 @@ pub trait ServiceManager {
 }
 
 /// Get the appropriate ServiceManager for the current OS.
-pub fn manager() -> Box<dyn ServiceManager> {
+pub fn manager() -> Box<dyn ServiceManager + Send + Sync> {
     let os = crate::core::platform::Os::detect();
     dlog!("service", "Creating service manager for: {:?}", os);
     match os {

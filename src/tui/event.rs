@@ -116,6 +116,7 @@ fn handle_token_input_key(app: &mut App, key: KeyEvent) -> bool {
                 .zip(app.token_disabled.iter())
                 .filter_map(|(t, &disabled)| if disabled { Some(t.clone()) } else { None })
                 .collect();
+            config.token_names.retain(|t, _| config.tokens.contains(t));
             dlog!("event", "  saving config: total={} active={} disabled={}",
                 config.tokens.len(),
                 config.active_tokens().len(),

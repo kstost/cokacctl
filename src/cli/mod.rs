@@ -58,6 +58,23 @@ pub struct Cli {
     /// Enable debug logging to ~/.cokacdir/debug/cokacctl.log
     #[arg(long, global = true)]
     pub debug: bool,
+
+    /// Launch the web dashboard on localhost and open it in a browser
+    #[arg(long)]
+    pub dashboard: bool,
+
+    /// Starting port for the dashboard web server. If the port is already in
+    /// use, cokacctl walks forward to the next free port (up to 20 attempts)
+    /// and prints the port it actually bound. Applies to both loopback and
+    /// --inbound modes. Requires --dashboard.
+    #[arg(long, value_name = "PORT", requires = "dashboard", default_value_t = 38573)]
+    pub port: u16,
+
+    /// Bind the dashboard to all interfaces so other hosts on the network can
+    /// reach it. Without this flag, the server listens on 127.0.0.1 only.
+    /// Requires --dashboard.
+    #[arg(long, requires = "dashboard")]
+    pub inbound: bool,
 }
 
 #[derive(Debug, Subcommand)]

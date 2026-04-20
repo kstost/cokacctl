@@ -34,13 +34,40 @@ fn get_log_state() -> &'static Mutex<LogState> {
         let dir = home.join(".cokacdir").join("debug");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("cokacctl.log");
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .ok();
+        let file = open_log_file(&path);
         Mutex::new(LogState { file, path })
     })
+}
+
+/// Opens (or creates) the debug log. On Unix, force mode 0o600 so request
+/// metadata (peer IPs, paths, service command stdout/stderr) and anything
+/// else `dlog!` writes isn't world-readable on shared hosts. The config file
+/// and TLS key file already use 0o600; this closes the one remaining 0o644
+/// gap in the `~/.cokacdir/` tree.
+fn open_log_file(path: &std::path::Path) -> Option<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path)
+            .ok()?;
+        // `.mode()` only applies when the file is newly created. Pre-existing
+        // files keep their old perms, so we also tighten them in place. Errors
+        // (e.g. file owned by another user) are ignored — the log still works.
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        Some(f)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+    }
 }
 
 /// Rotate the current log to `cokacctl.log.<timestamp>` when it exceeds
@@ -64,11 +91,7 @@ fn rotate_if_needed(state: &mut LogState) {
 
     // Reopen a fresh log file. If this fails we silently proceed — subsequent
     // writes will see `file = None` and skip.
-    state.file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&state.path)
-        .ok();
+    state.file = open_log_file(&state.path);
 }
 
 pub fn log(module: &str, msg: &str) {
