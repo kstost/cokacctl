@@ -29,12 +29,16 @@ pub struct Inner {
 #[derive(Clone)]
 pub struct SharedState {
     inner: Arc<Mutex<Inner>>,
-    /// Per-session secret required as `Authorization: Bearer <token>` when
-    /// the dashboard is reachable from the network. `None` means auth is
-    /// disabled (loopback mode). The initial HTML fetch doesn't go through
-    /// this check — it lands on the static asset handler, which is fine
-    /// because the HTML has no embedded secrets and the bearer only needs
-    /// to reach the browser so the JSX bundle can attach it on `/api/*`.
+    /// Per-session secret required as `Authorization: Bearer <token>` on
+    /// every `/api/*` request. Minted for both loopback and inbound modes —
+    /// in loopback it's a defense-in-depth layer on top of the Host
+    /// allowlist, cutting off local processes that know the port but not
+    /// the token. `None` leaves auth disabled but is no longer produced by
+    /// the normal startup path; the branch is retained so tests/embedders
+    /// can still opt out. The initial HTML fetch doesn't go through this
+    /// check — it lands on the static asset handler, which is fine because
+    /// the HTML has no embedded secrets and the bearer only needs to reach
+    /// the browser so the JSX bundle can attach it on `/api/*`.
     auth_token: Arc<Option<String>>,
     /// Tracks whether the current bind is reachable from the network.
     inbound: bool,
@@ -95,8 +99,10 @@ impl SharedState {
     ///  * Static assets carry no secrets; the JSX bundle reads the bearer
     ///    from `location.hash` only when loaded from the legit URL.
     ///
-    /// Loopback mode keeps the strict allowlist because `auth_token` is
-    /// `None` there — Host is the primary DNS-rebinding defense.
+    /// Loopback mode keeps the strict allowlist as the primary
+    /// DNS-rebinding defense. The bearer token minted in loopback is an
+    /// additional layer but the allowlist fires first and rejects
+    /// unknown-Host requests before any auth check runs.
     pub fn host_allowed(&self, host: Option<&str>) -> bool {
         if self.inbound {
             return true;

@@ -2,7 +2,10 @@
 //!
 //! Hand-rolled so we can avoid pulling in axum/hyper as a direct dependency.
 //! Two modes:
-//!  * **Loopback** (`--dashboard`) — bound to 127.0.0.1, plain HTTP, no auth.
+//!  * **Loopback** (`--dashboard`) — bound to 127.0.0.1, plain HTTP. Host
+//!    allowlist blocks DNS-rebinding; a per-session bearer secret adds a
+//!    defense-in-depth layer against co-resident local processes that might
+//!    know the port but not the token.
 //!  * **Inbound**  (`--inbound`)   — bound to all interfaces, **HTTPS only**
 //!    via a per-host self-signed cert under `~/.cokacdir/dashboard/`, plus a
 //!    256-bit per-session bearer secret required on every `/api/*` call.
@@ -108,14 +111,16 @@ pub async fn serve(port: u16, inbound: bool) -> Result<(), String> {
     };
     let (listener, port) = bind_with_fallback(bind_ip, port).await?;
 
-    // Inbound mode: mint per-session bearer secret + load/create TLS material
-    // so every byte on the wire is encrypted.
-    let (auth_token, tls_material) = if inbound {
-        let secret = generate_secret()?;
-        let tls = tls::load_or_create()?;
-        (Some(secret), Some(tls))
+    // Mint per-session bearer secret for both modes. In inbound mode it's the
+    // primary auth boundary; in loopback it's a second layer on top of the
+    // Host allowlist so a co-resident local process can't hit /api/* just by
+    // guessing the port. TLS material is inbound-only — loopback stays plain
+    // HTTP since the traffic never leaves the kernel's loopback interface.
+    let auth_token = Some(generate_secret()?);
+    let tls_material = if inbound {
+        Some(tls::load_or_create()?)
     } else {
-        (None, None)
+        None
     };
     let state = SharedState::new(auth_token.clone(), inbound, port);
     let acceptor = tls_material.as_ref().map(|m| TlsAcceptor::from(m.server_config.clone()));
@@ -123,7 +128,8 @@ pub async fn serve(port: u16, inbound: bool) -> Result<(), String> {
     print_banner(port, inbound, auth_token.as_deref(), tls_material.as_ref());
 
     if !inbound {
-        try_open_browser(&format!("http://127.0.0.1:{}/", port));
+        let secret = auth_token.as_deref().unwrap_or("");
+        try_open_browser(&format!("http://127.0.0.1:{}/#access={}", port, secret));
     }
 
     dlog!(
@@ -515,8 +521,11 @@ fn print_banner(port: u16, inbound: bool, auth: Option<&str>, tls: Option<&tls::
         println!("  \x1b[33m! Inbound mode: bound to 0.0.0.0 — reachable from other hosts.\x1b[0m");
         println!("  \x1b[33m  Treat the URL like a password — anyone with it gets full control.\x1b[0m");
     } else {
-        println!("  Open: http://127.0.0.1:{}/", port);
+        let secret = auth.unwrap_or("");
+        println!("  Open: http://127.0.0.1:{}/#access={}", port, secret);
         println!("  Bound to loopback only — not reachable from other hosts.");
+        println!("  Access token in the URL is required; other local processes");
+        println!("  that don't have it cannot reach /api/*.");
     }
     println!("  Press Ctrl+C to stop.");
     println!();

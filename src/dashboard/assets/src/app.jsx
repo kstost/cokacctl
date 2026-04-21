@@ -1,13 +1,14 @@
 /* Main app — wired to cokacctl's local REST API on loopback. */
 
 /* ── auth bootstrap ─────────────────────────────────────────
-   In inbound mode, cokacctl prints a URL like
-     http://<host>:<port>/#access=<hex-token>
+   Both loopback and inbound modes emit a URL like
+     http(s)://<host>:<port>/#access=<hex-token>
    The fragment never reaches the server, so we capture it on load,
    stash it in sessionStorage, and immediately scrub it out of the
    URL bar / history. The token is then attached as
      Authorization: Bearer <token>
-   on every API call. Loopback mode skips auth entirely. */
+   on every API call. In loopback it's a defense-in-depth layer on
+   top of the Host allowlist; in inbound it's the primary auth. */
 const AUTH_KEY = 'cokacctl-auth';
 function captureAuthFromHash() {
   try {
