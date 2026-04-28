@@ -3,6 +3,9 @@ use crate::core::{download, platform, ProgressMsg, ProgressTx};
 const SHELL_FUNC: &str =
     r#"cokacdir() { command cokacdir "$@" && cd "$(cat ~/.cokacdir/lastdir 2>/dev/null || pwd)"; }"#;
 
+const PATH_MARKER: &str = "# cokacdir PATH (added by installer)";
+const PATH_BLOCK: &str = "\n# cokacdir PATH (added by installer)\ncase \":$PATH:\" in\n    *\":$HOME/.local/bin:\"*) ;;\n    *) export PATH=\"$HOME/.local/bin:$PATH\" ;;\nesac\n";
+
 fn send(tx: &Option<ProgressTx>, msg: String) {
     if let Some(tx) = tx {
         tx.send(ProgressMsg::Log(msg)).ok();
@@ -99,7 +102,7 @@ async fn run_inner(tx: &Option<ProgressTx>) -> Result<(), String> {
     // Setup shell wrapper on Unix
     if os != platform::Os::Windows {
         dlog!("install", "Setting up shell wrapper...");
-        setup_shell_wrapper_inner(tx);
+        setup_shell_wrapper_inner(tx, &dest);
     }
 
     send(tx, format!("  cokacdir installed at {}", dest.display()));
@@ -176,7 +179,6 @@ async fn install_with_sudo(url: &str, dest: &std::path::Path, was_running: bool,
         }
         std::fs::remove_file(&tmp).ok();
         send(tx, format!("  cokacdir installed at {}", fallback.display()));
-        send(tx, format!("  Note: Ensure {} is in your PATH", fallback.parent().unwrap_or(std::path::Path::new("~/.local/bin")).display()));
         fallback
     } else {
         dlog!("install", "sudo mv succeeded");
@@ -184,7 +186,7 @@ async fn install_with_sudo(url: &str, dest: &std::path::Path, was_running: bool,
         dest.to_path_buf()
     };
 
-    setup_shell_wrapper_inner(tx);
+    setup_shell_wrapper_inner(tx, &actual_path);
 
     if was_running {
         let config = crate::core::config::Config::load();
@@ -213,33 +215,55 @@ fn is_writable(path: &std::path::Path) -> bool {
     }
 }
 
-fn setup_shell_wrapper_inner(tx: &Option<ProgressTx>) {
+fn setup_shell_wrapper_inner(tx: &Option<ProgressTx>, install_path: &std::path::Path) {
     let config_path = match platform::shell_config_path() {
         Some(p) => p,
         None => return,
     };
 
-    if config_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&config_path) {
-            if content.contains("cokacdir()") {
-                dlog!("install", "Shell wrapper already exists in {}", config_path.display());
-                return;
-            }
-        }
-    }
-
-    let mut content = if config_path.exists() {
+    let existing = if config_path.exists() {
         std::fs::read_to_string(&config_path).unwrap_or_default()
     } else {
         String::new()
     };
 
-    content.push_str("\n# cokacdir - cd to last directory on exit\n");
-    content.push_str(SHELL_FUNC);
-    content.push('\n');
+    let needs_wrapper = !existing.contains("cokacdir()");
+
+    // Only add the PATH block when we installed under the fallback directory
+    // (~/.local/bin). For /usr/local/bin installs the directory is already in
+    // PATH on every supported distro, so we don't pollute the user's rc file.
+    let fallback_dir: Option<std::path::PathBuf> =
+        platform::fallback_install_path().parent().map(|p| p.to_path_buf());
+    let installed_in_fallback_dir = match (fallback_dir.as_ref(), install_path.parent()) {
+        (Some(fb), Some(ip)) => fb == ip,
+        _ => false,
+    };
+    let needs_path = installed_in_fallback_dir && !existing.contains(PATH_MARKER);
+
+    if !needs_wrapper && !needs_path {
+        dlog!("install", "Shell config already up to date: {}", config_path.display());
+        return;
+    }
+
+    let mut content = existing;
+    if needs_wrapper {
+        content.push_str("\n# cokacdir - cd to last directory on exit\n");
+        content.push_str(SHELL_FUNC);
+        content.push('\n');
+    }
+    if needs_path {
+        content.push_str(PATH_BLOCK);
+    }
 
     if std::fs::write(&config_path, &content).is_ok() {
-        dlog!("install", "Shell wrapper added to {}", config_path.display());
-        send(tx, format!("  Shell wrapper added to {}", config_path.display()));
+        if needs_wrapper {
+            dlog!("install", "Shell wrapper added to {}", config_path.display());
+            send(tx, format!("  Shell wrapper added to {}", config_path.display()));
+        }
+        if needs_path {
+            dlog!("install", "PATH export added to {}", config_path.display());
+            send(tx, format!("  Added ~/.local/bin to PATH in {}", config_path.display()));
+            send(tx, format!("  Open a new terminal (or run: source {}) to apply.", config_path.display()));
+        }
     }
 }

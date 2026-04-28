@@ -113,17 +113,13 @@ get_shell_config() {
     esac
 }
 
-# Setup shell wrapper function
+# Setup shell wrapper function (and PATH export when fallback dir is used)
 setup_shell() {
+    local install_dir="$1"
     local config_file
     config_file="$(get_shell_config)"
 
     if [ -z "$config_file" ]; then
-        return
-    fi
-
-    # Check if already configured
-    if [ -f "$config_file" ] && grep -q "cokacctl()" "$config_file"; then
         return
     fi
 
@@ -132,10 +128,27 @@ setup_shell() {
         touch "$config_file"
     fi
 
-    # Add function
-    echo "" >> "$config_file"
-    echo "# cokacctl - cd to last directory on exit" >> "$config_file"
-    echo "$SHELL_FUNC" >> "$config_file"
+    # Add wrapper function (idempotent)
+    if ! grep -q "cokacctl()" "$config_file"; then
+        {
+            echo ""
+            echo "# cokacctl - cd to last directory on exit"
+            echo "$SHELL_FUNC"
+        } >> "$config_file"
+    fi
+
+    # Add PATH block when installed under $HOME/.local/bin (idempotent).
+    # The block itself runtime-checks PATH so sourcing repeatedly won't duplicate entries.
+    if [ "$install_dir" = "$HOME/.local/bin" ] && ! grep -q "# cokacctl PATH (added by installer)" "$config_file"; then
+        {
+            echo ""
+            echo "# cokacctl PATH (added by installer)"
+            echo 'case ":$PATH:" in'
+            echo '    *":$HOME/.local/bin:"*) ;;'
+            echo '    *) export PATH="$HOME/.local/bin:$PATH" ;;'
+            echo 'esac'
+        } >> "$config_file"
+    fi
 }
 
 main() {
@@ -177,15 +190,22 @@ main() {
 
     # Verify installation
     if [ -x "$install_path" ]; then
-        # Check if in PATH
-        if ! echo "$PATH" | grep -q "$install_dir"; then
-            warn "Add to PATH: export PATH=\"$install_dir:\$PATH\""
-        fi
-
-        # Setup shell wrapper
-        setup_shell
+        # Setup shell wrapper (and PATH if installed under fallback dir)
+        setup_shell "$install_dir"
 
         success "Installed!"
+
+        # Current shell can't have its PATH mutated from a child process; if the
+        # fallback dir isn't in this shell's PATH, the user needs a fresh shell.
+        if [ "$install_dir" = "$HOME/.local/bin" ] && ! echo ":$PATH:" | grep -q ":$install_dir:"; then
+            local config_file
+            config_file="$(get_shell_config)"
+            if [ -n "$config_file" ]; then
+                warn "Open a new terminal (or run: source $config_file) to apply PATH."
+            else
+                warn "Open a new terminal to apply PATH."
+            fi
+        fi
 
         success "Run 'cokacctl' to start."
     else
