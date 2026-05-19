@@ -109,6 +109,8 @@ pub async fn serve(port: u16, inbound: bool) -> Result<(), String> {
     } else {
         IpAddr::V4(Ipv4Addr::LOCALHOST)
     };
+    dlog!("dashboard", "serve(): bind_ip={} requested_port={} inbound={}",
+          bind_ip, port, inbound);
     let (listener, port) = bind_with_fallback(bind_ip, port).await?;
 
     // Mint per-session bearer secret for both modes. In inbound mode it's the
@@ -117,13 +119,16 @@ pub async fn serve(port: u16, inbound: bool) -> Result<(), String> {
     // guessing the port. TLS material is inbound-only — loopback stays plain
     // HTTP since the traffic never leaves the kernel's loopback interface.
     let auth_token = Some(generate_secret()?);
+    dlog!("dashboard", "auth token minted");
     let tls_material = if inbound {
+        dlog!("dashboard", "loading/creating TLS material");
         Some(tls::load_or_create()?)
     } else {
         None
     };
     let state = SharedState::new(auth_token.clone(), inbound, port);
     let acceptor = tls_material.as_ref().map(|m| TlsAcceptor::from(m.server_config.clone()));
+    dlog!("dashboard", "SharedState built (acceptor={})", acceptor.is_some());
 
     print_banner(port, inbound, auth_token.as_deref(), tls_material.as_ref());
 
@@ -142,6 +147,7 @@ pub async fn serve(port: u16, inbound: bool) -> Result<(), String> {
         auth_token.is_some()
     );
 
+    let mut conn_seq: u64 = 0;
     loop {
         let (socket, peer) = match listener.accept().await {
             Ok(x) => x,
@@ -150,6 +156,8 @@ pub async fn serve(port: u16, inbound: bool) -> Result<(), String> {
                 continue;
             }
         };
+        conn_seq += 1;
+        dlog!("dashboard", "accept #{} from {}", conn_seq, peer);
         // Defense in depth: when the user asked for loopback only, refuse
         // any non-loopback peer even if a misconfiguration somehow routes in.
         if !inbound && !peer.ip().is_loopback() {
@@ -224,9 +232,13 @@ where
         }
     };
 
-    dlog!("dashboard", "{} {} from {}", req.method, req.path, peer);
+    dlog!("dashboard", "{} {} from {} host={:?} origin={:?} bearer_present={}",
+          req.method, req.path, peer, req.host, req.origin, req.bearer.is_some());
     let resp = route(&req, &state).await;
+    dlog!("dashboard", "writing response {} {} ({}B) to {}",
+          resp.status, resp.status_text, resp.body.len(), peer);
     write_response(&mut socket, &resp).await?;
+    dlog!("dashboard", "connection {} closed", peer);
     Ok(())
 }
 
@@ -328,6 +340,7 @@ async fn route(req: &Request, state: &SharedState) -> Response {
 
     if req.method == "GET" {
         if let Some((ct, body)) = assets::lookup(&req.path) {
+            dlog!("dashboard", "static asset hit {} ({}, {}B)", req.path, ct, body.len());
             return Response::static_str(ct, body);
         }
     }
@@ -336,6 +349,8 @@ async fn route(req: &Request, state: &SharedState) -> Response {
         if req.method != "GET" {
             if let Some(ref origin) = req.origin {
                 if !origin_matches_host(origin, req.host.as_deref()) {
+                    dlog!("dashboard", "origin mismatch: origin={:?} host={:?} -> 403",
+                          origin, req.host);
                     return Response::err_json(
                         403, "Forbidden",
                         "Cross-origin request blocked".into(),
@@ -348,12 +363,15 @@ async fn route(req: &Request, state: &SharedState) -> Response {
                   req.method, req.path, req.peer);
             return Response::unauthorized();
         }
+        dlog!("dashboard", "dispatching to api::handle");
         return api::handle(req, state).await;
     }
 
     if req.method != "GET" {
+        dlog!("dashboard", "method not allowed: {} {}", req.method, req.path);
         return Response::method_not_allowed();
     }
+    dlog!("dashboard", "not found: {} {}", req.method, req.path);
     Response::not_found()
 }
 

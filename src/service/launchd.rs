@@ -11,7 +11,6 @@ pub struct LaunchdManager {
 
 impl LaunchdManager {
     pub fn new() -> Self {
-        dlog!("launchd", "LaunchdManager created");
         LaunchdManager {
             paths: ServicePaths::for_current_os(),
         }

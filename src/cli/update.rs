@@ -11,15 +11,20 @@ fn send(tx: &Option<ProgressTx>, msg: String) {
 /// Best-effort restart after an update step failed while the service was
 /// stopped — avoids leaving the user with a silently-down service.
 fn try_restart_existing(tx: &Option<ProgressTx>) {
+    dlog!("update", "try_restart_existing: begin");
     let config = Config::load();
     let tokens = config.active_tokens();
     if tokens.is_empty() {
+        dlog!("update", "try_restart_existing: no active tokens, skip");
         return;
     }
     if let Some(existing) = platform::find_cokacdir() {
         dlog!("update", "Rollback: restarting with {}", existing.display());
         send(tx, "  Update failed — restarting service with existing binary...".into());
-        let _ = crate::service::manager().start(&existing, &tokens);
+        match crate::service::manager().start(&existing, &tokens) {
+            Ok(_)  => dlog!("update", "Rollback restart ok"),
+            Err(e) => dlog!("update", "Rollback restart failed: {}", e),
+        }
     } else {
         dlog!("update", "Rollback: no existing binary found, cannot restart");
     }
@@ -112,7 +117,12 @@ async fn run_inner(tx: &Option<ProgressTx>) -> Result<(), String> {
         if !tokens.is_empty() {
             dlog!("update", "Restarting service...");
             send(tx, "  Restarting service...".into());
-            mgr.start(&binary_path, &tokens).ok();
+            match mgr.start(&binary_path, &tokens) {
+                Ok(_)  => dlog!("update", "Post-update restart ok"),
+                Err(e) => dlog!("update", "Post-update restart failed: {}", e),
+            }
+        } else {
+            dlog!("update", "was_running but no active tokens to restart with");
         }
     }
 
@@ -125,9 +135,13 @@ fn is_writable_dir(path: &std::path::Path) -> bool {
     match std::fs::write(&test_file, b"") {
         Ok(_) => {
             std::fs::remove_file(&test_file).ok();
+            dlog!("update", "is_writable_dir: {} -> true", path.display());
             true
         }
-        Err(_) => false,
+        Err(e) => {
+            dlog!("update", "is_writable_dir: {} -> false ({})", path.display(), e);
+            false
+        }
     }
 }
 
@@ -228,7 +242,12 @@ async fn update_with_sudo(
             dlog!("update", "Restarting service after sudo update...");
             send(tx, "  Restarting service...".into());
             let mgr = crate::service::manager();
-            mgr.start(dest, &tokens).ok();
+            match mgr.start(dest, &tokens) {
+                Ok(_)  => dlog!("update", "Post-sudo-update restart ok"),
+                Err(e) => dlog!("update", "Post-sudo-update restart failed: {}", e),
+            }
+        } else {
+            dlog!("update", "was_running but no active tokens to restart with");
         }
     }
 

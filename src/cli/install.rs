@@ -19,15 +19,20 @@ fn send(tx: &Option<ProgressTx>, msg: String) {
 /// Uses whatever binary is currently findable (old binary on plain failure,
 /// or restored-from-.old binary on partial replacement).
 fn try_restart_existing(tx: &Option<ProgressTx>) {
+    dlog!("install", "try_restart_existing: begin");
     let config = crate::core::config::Config::load();
     let tokens = config.active_tokens();
     if tokens.is_empty() {
+        dlog!("install", "try_restart_existing: no active tokens — skip");
         return;
     }
     if let Some(existing) = platform::find_cokacdir() {
         dlog!("install", "Rollback: restarting with {}", existing.display());
         send(tx, "  Install failed — restarting service with existing binary...".into());
-        let _ = crate::service::manager().start(&existing, &tokens);
+        match crate::service::manager().start(&existing, &tokens) {
+            Ok(_)  => dlog!("install", "Rollback: service restart ok"),
+            Err(e) => dlog!("install", "Rollback: service restart failed: {}", e),
+        }
     } else {
         dlog!("install", "Rollback: no existing binary found, cannot restart");
     }
@@ -203,22 +208,33 @@ async fn install_with_sudo(url: &str, dest: &std::path::Path, was_running: bool,
 
 fn is_writable(path: &std::path::Path) -> bool {
     if !path.exists() {
+        dlog!("install", "is_writable: {} does not exist -> false", path.display());
         return false;
     }
     let test_file = path.join(".cokacctl_write_test");
     match std::fs::write(&test_file, b"") {
         Ok(_) => {
             std::fs::remove_file(&test_file).ok();
+            dlog!("install", "is_writable: {} -> true", path.display());
             true
         }
-        Err(_) => false,
+        Err(e) => {
+            dlog!("install", "is_writable: {} -> false ({})", path.display(), e);
+            false
+        }
     }
 }
 
 fn setup_shell_wrapper_inner(tx: &Option<ProgressTx>, install_path: &std::path::Path) {
     let config_path = match platform::shell_config_path() {
-        Some(p) => p,
-        None => return,
+        Some(p) => {
+            dlog!("install", "setup_shell_wrapper: config={}", p.display());
+            p
+        }
+        None => {
+            dlog!("install", "setup_shell_wrapper: no shell config path detected, skip");
+            return;
+        }
     };
 
     let existing = if config_path.exists() {
@@ -255,15 +271,20 @@ fn setup_shell_wrapper_inner(tx: &Option<ProgressTx>, install_path: &std::path::
         content.push_str(PATH_BLOCK);
     }
 
-    if std::fs::write(&config_path, &content).is_ok() {
-        if needs_wrapper {
-            dlog!("install", "Shell wrapper added to {}", config_path.display());
-            send(tx, format!("  Shell wrapper added to {}", config_path.display()));
+    match std::fs::write(&config_path, &content) {
+        Ok(_) => {
+            if needs_wrapper {
+                dlog!("install", "Shell wrapper added to {}", config_path.display());
+                send(tx, format!("  Shell wrapper added to {}", config_path.display()));
+            }
+            if needs_path {
+                dlog!("install", "PATH export added to {}", config_path.display());
+                send(tx, format!("  Added ~/.local/bin to PATH in {}", config_path.display()));
+                send(tx, format!("  Open a new terminal (or run: source {}) to apply.", config_path.display()));
+            }
         }
-        if needs_path {
-            dlog!("install", "PATH export added to {}", config_path.display());
-            send(tx, format!("  Added ~/.local/bin to PATH in {}", config_path.display()));
-            send(tx, format!("  Open a new terminal (or run: source {}) to apply.", config_path.display()));
+        Err(e) => {
+            dlog!("install", "shell config write failed for {}: {}", config_path.display(), e);
         }
     }
 }

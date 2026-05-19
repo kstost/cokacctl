@@ -35,18 +35,28 @@ pub struct TlsMaterial {
 }
 
 pub fn load_or_create() -> Result<TlsMaterial, String> {
+    dlog!("dashboard::tls", "load_or_create: begin");
     // rustls 0.23 requires a process-wide crypto provider to be installed
     // before any ServerConfig can be built. ring is the default and is what
     // we compiled in. install_default returns Err if already installed —
     // ignore that since we only care that it's present.
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let install_res = rustls::crypto::ring::default_provider().install_default();
+    dlog!("dashboard::tls", "ring crypto provider install_default ok={}",
+          install_res.is_ok());
 
     let dir = dirs::home_dir()
-        .ok_or_else(|| "Cannot determine home directory".to_string())?
+        .ok_or_else(|| {
+            dlog!("dashboard::tls", "home_dir() returned None");
+            "Cannot determine home directory".to_string()
+        })?
         .join(".cokacdir")
         .join("dashboard");
+    dlog!("dashboard::tls", "cert dir: {}", dir.display());
     fs::create_dir_all(&dir)
-        .map_err(|e| format!("Cannot create cert directory {}: {}", dir.display(), e))?;
+        .map_err(|e| {
+            dlog!("dashboard::tls", "create_dir_all failed: {}", e);
+            format!("Cannot create cert directory {}: {}", dir.display(), e)
+        })?;
 
     let cert_path = dir.join("cert.pem");
     let key_path = dir.join("key.pem");
@@ -68,9 +78,12 @@ pub fn load_or_create() -> Result<TlsMaterial, String> {
     };
 
     let cert_chain = parse_cert_chain(&cert_pem)?;
+    dlog!("dashboard::tls", "parsed cert chain ({} certs)", cert_chain.len());
     let priv_key = parse_priv_key(&key_pem)?;
+    dlog!("dashboard::tls", "parsed private key");
 
     if cert_chain.is_empty() {
+        dlog!("dashboard::tls", "cert chain empty after parse");
         return Err("Parsed cert chain was empty".into());
     }
     let fingerprint = sha256_fingerprint(&cert_chain[0]);
@@ -78,7 +91,10 @@ pub fn load_or_create() -> Result<TlsMaterial, String> {
     let mut config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(cert_chain, priv_key)
-        .map_err(|e| format!("rustls ServerConfig: {}", e))?;
+        .map_err(|e| {
+            dlog!("dashboard::tls", "ServerConfig with_single_cert failed: {}", e);
+            format!("rustls ServerConfig: {}", e)
+        })?;
     // Browser fetches use HTTP/1.1 — advertising it explicitly avoids ALPN
     // probing edge cases on some clients.
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
@@ -158,8 +174,12 @@ fn try_load(
 }
 
 fn generate_cert(san: &[String]) -> Result<(String, String), String> {
+    dlog!("dashboard::tls", "generate_cert: san_count={}", san.len());
     let mut params = CertificateParams::new(san.to_vec())
-        .map_err(|e| format!("CertificateParams::new: {}", e))?;
+        .map_err(|e| {
+            dlog!("dashboard::tls", "CertificateParams::new failed: {}", e);
+            format!("CertificateParams::new: {}", e)
+        })?;
 
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, "cokacctl dashboard");
@@ -171,10 +191,17 @@ fn generate_cert(san: &[String]) -> Result<(String, String), String> {
     // cleanly across rcgen minor versions, so we rely on the default —
     // clock skew of a few seconds is tolerated by every mainstream browser.
 
-    let key_pair = KeyPair::generate().map_err(|e| format!("KeyPair::generate: {}", e))?;
+    let key_pair = KeyPair::generate().map_err(|e| {
+        dlog!("dashboard::tls", "KeyPair::generate failed: {}", e);
+        format!("KeyPair::generate: {}", e)
+    })?;
     let cert = params
         .self_signed(&key_pair)
-        .map_err(|e| format!("self_signed: {}", e))?;
+        .map_err(|e| {
+            dlog!("dashboard::tls", "self_signed failed: {}", e);
+            format!("self_signed: {}", e)
+        })?;
+    dlog!("dashboard::tls", "generate_cert: cert and key produced");
 
     Ok((cert.pem(), key_pair.serialize_pem()))
 }
@@ -185,9 +212,16 @@ fn persist(
     cert_pem: &str,
     key_pem: &str,
 ) -> Result<(), String> {
+    dlog!("dashboard::tls", "persist: writing cert ({}B) to {}",
+          cert_pem.len(), cert_path.display());
     // Cert is public; default perms (0644) are fine.
     fs::write(cert_path, cert_pem)
-        .map_err(|e| format!("Cannot write cert {}: {}", cert_path.display(), e))?;
+        .map_err(|e| {
+            dlog!("dashboard::tls", "cert write failed: {}", e);
+            format!("Cannot write cert {}: {}", cert_path.display(), e)
+        })?;
+    dlog!("dashboard::tls", "persist: writing key ({}B) to {}",
+          key_pem.len(), key_path.display());
 
     // Private key must be 0600 — write to tmp + rename so the file is never
     // visible at the default umask between create and chmod.
@@ -209,13 +243,20 @@ fn persist(
             let _ = f.sync_all();
         }
         fs::rename(&tmp, key_path)
-            .map_err(|e| format!("Cannot finalize key: {}", e))?;
+            .map_err(|e| {
+                dlog!("dashboard::tls", "key tmp rename failed: {}", e);
+                format!("Cannot finalize key: {}", e)
+            })?;
     }
     #[cfg(not(unix))]
     {
         fs::write(key_path, key_pem)
-            .map_err(|e| format!("Cannot write key: {}", e))?;
+            .map_err(|e| {
+                dlog!("dashboard::tls", "key write failed: {}", e);
+                format!("Cannot write key: {}", e)
+            })?;
     }
+    dlog!("dashboard::tls", "persist: done");
     Ok(())
 }
 

@@ -1,4 +1,21 @@
 use std::path::PathBuf;
+use std::sync::Mutex;
+
+/// Tracks the last error key emitted by `read_new_lines` so the 2-second
+/// poll doesn't spam the debug log with identical "file missing" lines while
+/// the cokacdir service hasn't created the log yet.
+static LAST_READ_ERR: Mutex<String> = Mutex::new(String::new());
+
+fn read_err_key_changed(key: &str) -> bool {
+    // Recover from poison: the cached value is a dedup hint only.
+    let mut last = LAST_READ_ERR.lock().unwrap_or_else(|e| e.into_inner());
+    if *last != key {
+        *last = key.to_string();
+        true
+    } else {
+        false
+    }
+}
 
 /// Load the last N lines from a log file.
 ///
@@ -29,9 +46,23 @@ pub fn load_log_lines(path: &PathBuf, max_lines: usize) -> Vec<String> {
 /// Check if the file has grown since the given position. Returns new lines.
 pub fn read_new_lines(path: &PathBuf, last_size: &mut u64) -> Vec<String> {
     let metadata = match std::fs::metadata(path) {
-        Ok(m) => m,
+        Ok(m) => {
+            // Recovery transition: previously had an error, now succeeded.
+            if read_err_key_changed("ok") {
+                dlog!("log_viewer", "read_new_lines: metadata ok ({})", path.display());
+            }
+            m
+        }
         Err(e) => {
-            dlog!("log_viewer", "read_new_lines: metadata failed ({}): {}", path.display(), e);
+            let key = format!("metadata:{:?}", e.kind());
+            if read_err_key_changed(&key) {
+                dlog!(
+                    "log_viewer",
+                    "read_new_lines: metadata failed ({}): {}",
+                    path.display(),
+                    e
+                );
+            }
             return Vec::new();
         }
     };

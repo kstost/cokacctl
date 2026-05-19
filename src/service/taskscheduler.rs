@@ -12,7 +12,6 @@ pub struct TaskSchedulerManager {
 
 impl TaskSchedulerManager {
     pub fn new() -> Self {
-        dlog!("taskscheduler", "TaskSchedulerManager created");
         TaskSchedulerManager {
             paths: ServicePaths::for_current_os(),
         }

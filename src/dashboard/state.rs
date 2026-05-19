@@ -109,9 +109,16 @@ impl SharedState {
         }
         let got = match host {
             Some(h) => h.trim().to_ascii_lowercase(),
-            None => return false,
+            None => {
+                crate::dlog!("state", "host_allowed: missing Host header -> deny");
+                return false;
+            }
         };
-        self.allowed_hosts.iter().any(|a| a == &got)
+        let ok = self.allowed_hosts.iter().any(|a| a == &got);
+        if !ok {
+            crate::dlog!("state", "host_allowed: deny {:?} (allowed={:?})", got, self.allowed_hosts);
+        }
+        ok
     }
 
     /// Constant-time comparison of a presented token against the configured
@@ -119,18 +126,29 @@ impl SharedState {
     pub fn check_auth(&self, presented: Option<&str>) -> bool {
         let expected = match self.auth_token.as_ref() {
             Some(t) => t.as_bytes(),
-            None => return true, // auth disabled
+            None => {
+                crate::dlog!("state", "check_auth: auth disabled -> allow");
+                return true;
+            }
         };
         let got = match presented {
             Some(p) => p.as_bytes(),
-            None => return false,
+            None => {
+                crate::dlog!("state", "check_auth: no bearer presented");
+                return false;
+            }
         };
         if expected.len() != got.len() {
+            crate::dlog!("state", "check_auth: length mismatch (got {}B want {}B)",
+                         got.len(), expected.len());
             return false;
         }
         let mut diff: u8 = 0;
         for (a, b) in expected.iter().zip(got.iter()) {
             diff |= a ^ b;
+        }
+        if diff != 0 {
+            crate::dlog!("state", "check_auth: bearer mismatch");
         }
         diff == 0
     }
@@ -139,6 +157,8 @@ impl SharedState {
         let mut g = self.inner.lock().unwrap();
         g.next_id += 1;
         let id = format!("a-{}", g.next_id);
+        crate::dlog!("state", "push_activity #{} kind={} title={} meta={} tone={}",
+                     g.next_id, kind, title, meta, tone);
         let item = ActivityItem {
             id,
             kind: kind.to_string(),
@@ -158,10 +178,12 @@ impl SharedState {
     }
 
     pub fn mark_started(&self) {
+        crate::dlog!("state", "mark_started");
         self.inner.lock().unwrap().started_at = Some(SystemTime::now());
     }
 
     pub fn mark_stopped(&self) {
+        crate::dlog!("state", "mark_stopped");
         self.inner.lock().unwrap().started_at = None;
     }
 
@@ -178,12 +200,14 @@ impl SharedState {
     }
 
     pub fn set_latest_version(&self, v: Option<String>) {
+        crate::dlog!("state", "set_latest_version: {:?}", v);
         let mut g = self.inner.lock().unwrap();
         g.latest_version = v;
         g.last_check = Some(SystemTime::now());
     }
 
     pub fn set_checking(&self, v: bool) {
+        crate::dlog!("state", "set_checking: {}", v);
         self.inner.lock().unwrap().checking_update = v;
     }
 
@@ -206,12 +230,15 @@ impl SharedState {
 /// `[addr]:port` form for IPv6.
 fn build_allowed_hosts(inbound: bool, port: u16) -> Vec<String> {
     if inbound {
+        crate::dlog!("state", "build_allowed_hosts: inbound mode -> empty allowlist");
         return Vec::new();
     }
-    ["localhost", "127.0.0.1", "::1"]
+    let list: Vec<String> = ["localhost", "127.0.0.1", "::1"]
         .into_iter()
         .map(|e| format_host(e, port).to_ascii_lowercase())
-        .collect()
+        .collect();
+    crate::dlog!("state", "build_allowed_hosts: {:?}", list);
+    list
 }
 
 fn format_host(entry: &str, port: u16) -> String {
@@ -245,13 +272,18 @@ pub fn rfc3339_systime(t: SystemTime) -> String {
 /// URL like a password. The caller is expected to propagate the error so
 /// `--inbound` fails loudly instead of silently opening a weak door.
 pub fn generate_secret() -> Result<String, String> {
+    crate::dlog!("state", "generate_secret: drawing 32B from OS RNG");
     let mut bytes = [0u8; 32];
     getrandom::getrandom(&mut bytes)
-        .map_err(|e| format!(
-            "OS RNG unavailable ({}). Refusing to start the inbound dashboard \
-             with a degraded auth secret — investigate /dev/urandom or the \
-             platform RNG source.",
-            e
-        ))?;
+        .map_err(|e| {
+            crate::dlog!("state", "generate_secret: OS RNG failed: {}", e);
+            format!(
+                "OS RNG unavailable ({}). Refusing to start the inbound dashboard \
+                 with a degraded auth secret — investigate /dev/urandom or the \
+                 platform RNG source.",
+                e
+            )
+        })?;
+    crate::dlog!("state", "generate_secret: ok (64 hex chars)");
     Ok(bytes.iter().map(|b| format!("{:02x}", b)).collect())
 }

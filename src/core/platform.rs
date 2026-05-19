@@ -16,7 +16,7 @@ pub enum Arch {
 
 impl Os {
     pub fn detect() -> Self {
-        let os = match std::env::consts::OS {
+        match std::env::consts::OS {
             "macos" => Os::MacOS,
             "linux" => Os::Linux,
             "windows" => Os::Windows,
@@ -24,9 +24,7 @@ impl Os {
                 eprintln!("Unsupported OS: {}", other);
                 std::process::exit(1);
             }
-        };
-        dlog!("platform", "Detected OS: {:?}", os);
-        os
+        }
     }
 
     pub fn as_str(&self) -> &'static str {
@@ -40,16 +38,14 @@ impl Os {
 
 impl Arch {
     pub fn detect() -> Self {
-        let arch = match std::env::consts::ARCH {
+        match std::env::consts::ARCH {
             "x86_64" | "amd64" => Arch::X86_64,
             "aarch64" | "arm64" => Arch::Aarch64,
             other => {
                 eprintln!("Unsupported architecture: {}", other);
                 std::process::exit(1);
             }
-        };
-        dlog!("platform", "Detected Arch: {:?}", arch);
-        arch
+        }
     }
 
     pub fn as_str(&self) -> &'static str {
@@ -63,35 +59,29 @@ impl Arch {
 /// URL to download the cokacdir binary for the current platform.
 pub fn binary_download_url(os: Os, arch: Arch) -> String {
     let ext = if os == Os::Windows { ".exe" } else { "" };
-    let url = format!(
+    format!(
         "https://cokacdir.cokac.com/dist/cokacdir-{}-{}{}",
         os.as_str(),
         arch.as_str(),
         ext
-    );
-    dlog!("platform", "Binary download URL: {}", url);
-    url
+    )
 }
 
 /// Default installation path for cokacdir binary.
 pub fn default_install_path(os: Os) -> PathBuf {
-    let path = match os {
+    match os {
         Os::Windows => {
             let home = dirs::home_dir().expect("Cannot determine home directory");
             home.join("cokacdir.exe")
         }
         _ => PathBuf::from("/usr/local/bin/cokacdir"),
-    };
-    dlog!("platform", "Default install path: {}", path.display());
-    path
+    }
 }
 
 /// Fallback installation path when default is not writable.
 pub fn fallback_install_path() -> PathBuf {
     let home = dirs::home_dir().expect("Cannot determine home directory");
-    let path = home.join(".local").join("bin").join("cokacdir");
-    dlog!("platform", "Fallback install path: {}", path.display());
-    path
+    home.join(".local").join("bin").join("cokacdir")
 }
 
 /// Find cokacdir binary in PATH or default install location.
@@ -177,7 +167,7 @@ pub struct WindowsServiceState {
 impl ServicePaths {
     pub fn for_current_os() -> Self {
         let home = dirs::home_dir().expect("Cannot determine home directory");
-        let paths = match Os::detect() {
+        match Os::detect() {
             Os::MacOS => {
                 let log_dir = home.join("Library/Logs/cokacdir");
                 ServicePaths {
@@ -214,9 +204,7 @@ impl ServicePaths {
                     error_log_file: log_dir.join("cokacdir.error.log"),
                 }
             }
-        };
-        dlog!("platform", "Service paths - log_file: {}", paths.log_file.display());
-        paths
+        }
     }
 
     /// Read the wrapper script and count how many tokens were passed when the service last started.
@@ -254,8 +242,25 @@ impl ServicePaths {
     }
 
     pub fn windows_service_state(&self) -> Option<WindowsServiceState> {
-        let content = std::fs::read_to_string(&self.state_file).ok()?;
-        serde_json::from_str(&content).ok()
+        let content = match std::fs::read_to_string(&self.state_file) {
+            Ok(c) => c,
+            Err(e) => {
+                dlog!("platform", "windows_service_state read failed ({}): {}",
+                      self.state_file.display(), e);
+                return None;
+            }
+        };
+        match serde_json::from_str::<WindowsServiceState>(&content) {
+            Ok(s) => {
+                dlog!("platform", "windows_service_state parsed: schema={} task={} tokens={}",
+                      s.schema_version, s.task_name, s.token_count);
+                Some(s)
+            }
+            Err(e) => {
+                dlog!("platform", "windows_service_state parse failed: {}", e);
+                None
+            }
+        }
     }
 }
 

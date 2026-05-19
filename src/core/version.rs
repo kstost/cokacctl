@@ -74,12 +74,15 @@ fn parse_version_from_cargo_toml(content: &str) -> Option<String> {
             if let Some(start) = line.find('"') {
                 if let Some(end) = line.rfind('"') {
                     if start < end {
-                        return Some(line[start + 1..end].to_string());
+                        let v = line[start + 1..end].to_string();
+                        dlog!("version", "parsed version line: {:?}", v);
+                        return Some(v);
                     }
                 }
             }
         }
     }
+    dlog!("version", "no version line found in Cargo.toml ({}B)", content.len());
     None
 }
 

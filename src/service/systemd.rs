@@ -1,9 +1,15 @@
 use super::{ServiceManager, ServiceStatus};
 use crate::core::platform::ServicePaths;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
+use std::sync::Mutex;
 
 const SERVICE_NAME: &str = "cokacdir";
+
+/// Tracks the last-logged "status outcome key" so we don't spam the debug log
+/// every 5 s with identical lines while the user session is in a steady state.
+/// Only state transitions are logged.
+static LAST_STATUS_KEY: Mutex<String> = Mutex::new(String::new());
 
 pub struct SystemdManager {
     paths: ServicePaths,
@@ -11,7 +17,6 @@ pub struct SystemdManager {
 
 impl SystemdManager {
     pub fn new() -> Self {
-        dlog!("systemd", "SystemdManager created");
         SystemdManager {
             paths: ServicePaths::for_current_os(),
         }
@@ -21,6 +26,180 @@ impl SystemdManager {
         format!("'{}'", s.replace('\'', "'\\''"))
     }
 
+    /// Current user ID. Used to derive the standard user-bus path
+    /// (`/run/user/$UID/bus`) when the launcher's environment is missing it.
+    #[cfg(unix)]
+    fn current_uid() -> u32 {
+        // Safety: getuid() is async-signal-safe and never fails.
+        unsafe { libc::getuid() }
+    }
+
+    #[cfg(not(unix))]
+    fn current_uid() -> u32 {
+        0
+    }
+
+    /// XDG runtime directory for the current user.
+    ///
+    /// Honors `XDG_RUNTIME_DIR` if set, otherwise falls back to the systemd
+    /// default at `/run/user/$UID`. Used as the base for deriving the
+    /// user-bus socket location and for backfilling child env.
+    fn user_runtime_dir() -> PathBuf {
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", Self::current_uid())))
+    }
+
+    /// Filesystem path to the user D-Bus session socket, if it can be
+    /// determined as a unix path.
+    ///
+    /// Resolution order:
+    /// 1. `DBUS_SESSION_BUS_ADDRESS` parsed as `unix:path=...` — wins if set.
+    ///    For abstract sockets or other transports (tcp, unixexec, etc.)
+    ///    we return `None` because the socket has no stat-able path.
+    /// 2. `$XDG_RUNTIME_DIR/bus` — systemd default location, derived via
+    ///    `user_runtime_dir()`.
+    ///
+    /// `None` means "cannot precheck"; callers should skip filesystem
+    /// existence checks and let `systemctl --user` surface its own error.
+    fn user_bus_socket_path() -> Option<PathBuf> {
+        if let Some(addr) = std::env::var("DBUS_SESSION_BUS_ADDRESS")
+            .ok()
+            .filter(|s| !s.is_empty())
+        {
+            // dbus addresses may be `;`-separated alternatives — take the first.
+            let first = addr.split(';').next().unwrap_or(&addr);
+            if let Some(rest) = first.strip_prefix("unix:path=") {
+                // Per-address parameters are `,`-separated, e.g. `unix:path=/x,guid=...`.
+                let path = rest.split(',').next().unwrap_or(rest);
+                return Some(PathBuf::from(path));
+            }
+            // Non-path transport (unix:abstract=, tcp:, unixexec:, etc.) —
+            // no filesystem entry to check.
+            return None;
+        }
+        Some(Self::user_runtime_dir().join("bus"))
+    }
+
+    /// Long-form remediation text shown by `start()` when the user D-Bus
+    /// socket is missing.
+    ///
+    /// Linux exposes no authoritative in-guest API for "am I on WSL?", so
+    /// rather than guessing the user's environment from kernel-identity
+    /// strings, this message enumerates every known cause and lets the
+    /// reader pick the one that applies. No detection logic, no false
+    /// positives.
+    fn user_bus_missing_long(bus_path: &Path) -> String {
+        format!(
+            "User systemd bus not available at {}.\n\
+             The per-user systemd manager isn't reachable for this session.\n\
+             \n\
+             Pick the case that matches your environment:\n\
+             \n\
+             1) Standard Linux, lingering disabled:\n\
+                  loginctl enable-linger $USER\n\
+                then re-open the terminal as a login shell.\n\
+             \n\
+             2) Bus simply not started for this session:\n\
+                  systemctl --user start dbus.socket\n\
+             \n\
+             3) WSL2 without systemd enabled — add to /etc/wsl.conf:\n\
+                  [boot]\n\
+                  systemd=true\n\
+                then in PowerShell:  wsl --shutdown\n\
+                and re-open the terminal.\n\
+             \n\
+             4) WSL1 — systemd is not supported. In PowerShell (Administrator):\n\
+                  wsl --set-version <DistroName> 2",
+            bus_path.display()
+        )
+    }
+
+    /// One-line variant of `user_bus_missing_long` for the dashboard / TUI
+    /// status field. Neutral wording — no platform guess.
+    fn user_bus_missing_short() -> String {
+        "Per-user systemd bus unavailable".into()
+    }
+
+    /// Backfill `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` for child
+    /// processes that need to reach the user systemd / D-Bus instance.
+    ///
+    /// cokacctl is sometimes launched from a non-login shell (e.g., a freshly
+    /// opened WSL terminal) that lacks these variables. Without them,
+    /// `systemctl --user` aborts with "Failed to connect to bus: No medium
+    /// found" even though the user manager is up. We backfill from the
+    /// resolved runtime dir only when the parent env doesn't already supply
+    /// the variable, so an explicit setting always wins.
+    fn apply_user_env(cmd: &mut Command) {
+        let runtime_dir = Self::user_runtime_dir();
+        if std::env::var_os("XDG_RUNTIME_DIR")
+            .filter(|v| !v.is_empty())
+            .is_none()
+        {
+            cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
+        }
+        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS")
+            .filter(|v| !v.is_empty())
+            .is_none()
+        {
+            cmd.env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}", runtime_dir.join("bus").display()),
+            );
+        }
+    }
+
+    /// Build a `systemctl --user <args>` command with the user-session env
+    /// variables ensured (see `apply_user_env`).
+    fn user_systemctl_cmd<I, S>(args: I) -> Command
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let mut cmd = Command::new("systemctl");
+        cmd.arg("--user").args(args);
+        Self::apply_user_env(&mut cmd);
+        cmd
+    }
+
+    /// Build a `journalctl --user <args>` command with the user-session env
+    /// variables ensured.
+    fn user_journalctl_cmd<I, S>(args: I) -> Command
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let mut cmd = Command::new("journalctl");
+        cmd.arg("--user").args(args);
+        Self::apply_user_env(&mut cmd);
+        cmd
+    }
+
+    /// Returns true and updates the cache when `key` differs from the last
+    /// logged status key. Used to suppress repeated identical lines from the
+    /// 5-second status poll.
+    fn status_key_changed(key: &str) -> bool {
+        // Recover from a poisoned lock (would mean another thread panicked
+        // while holding it) rather than propagating the panic — the cached
+        // value is purely a dedup hint, not correctness-critical.
+        let mut last = LAST_STATUS_KEY
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if *last != key {
+            *last = key.to_string();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn log_status_transition(key: &str, msg: &str) {
+        if Self::status_key_changed(key) {
+            crate::core::debug::log("systemd", msg);
+        }
+    }
+
     fn escape_systemd_arg(s: &str) -> String {
         let escaped = s
             .replace('\\', "\\\\")
@@ -28,6 +207,23 @@ impl SystemdManager {
             .replace('$', "$$")
             .replace('%', "%%");
         format!("\"{}\"", escaped)
+    }
+
+    fn output_detail(output: &Output) -> String {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            "no output".to_string()
+        };
+
+        match output.status.code() {
+            Some(code) => format!("exit {}: {}", code, detail),
+            None => format!("terminated by signal: {}", detail),
+        }
     }
 
     fn generate_wrapper(binary_path: &Path, tokens: &[String]) -> String {
@@ -141,6 +337,34 @@ impl ServiceManager for SystemdManager {
             Err(e) => {
                 dlog!("systemd", "systemctl not found: {}", e);
                 return Err("systemctl not found. This tool requires systemd.".into());
+            }
+        }
+
+        // Precheck: the user D-Bus socket must exist for `systemctl --user`
+        // to work. If it doesn't, no amount of env-var injection will help —
+        // the user manager simply isn't reachable. Fail with an actionable
+        // message instead of letting daemon-reload spit out the cryptic
+        // "Failed to connect to bus: No medium found".
+        //
+        // For non-path bus transports (abstract sockets, tcp, …) we cannot
+        // stat anything, so we skip the precheck and let systemctl talk.
+        match Self::user_bus_socket_path() {
+            Some(bus_path) => {
+                dlog!("systemd", "start(): checking user bus at {}", bus_path.display());
+                if !bus_path.exists() {
+                    dlog!(
+                        "systemd",
+                        "start(): user bus socket missing: {}",
+                        bus_path.display()
+                    );
+                    return Err(Self::user_bus_missing_long(&bus_path));
+                }
+            }
+            None => {
+                dlog!(
+                    "systemd",
+                    "start(): DBUS_SESSION_BUS_ADDRESS uses non-path transport, skipping precheck"
+                );
             }
         }
 
@@ -267,25 +491,29 @@ impl ServiceManager for SystemdManager {
         }
 
         dlog!("systemd", "Running daemon-reload...");
-        let r = Command::new("systemctl")
-            .args(["--user", "daemon-reload"])
+        let r = Self::user_systemctl_cmd(["daemon-reload"])
             .output()
             .map_err(|e| format!("daemon-reload failed: {}", e))?;
         crate::core::debug::log_output("systemd", "systemctl --user daemon-reload", &r);
         if !r.status.success() {
             dlog!("systemd", "daemon-reload failed");
-            return Err("systemctl daemon-reload failed".into());
+            return Err(format!(
+                "systemctl --user daemon-reload failed ({})",
+                Self::output_detail(&r)
+            ));
         }
 
         dlog!("systemd", "Enabling service...");
-        let r = Command::new("systemctl")
-            .args(["--user", "enable", SERVICE_NAME])
+        let r = Self::user_systemctl_cmd(["enable", SERVICE_NAME])
             .output()
             .map_err(|e| format!("enable failed: {}", e))?;
         crate::core::debug::log_output("systemd", "systemctl --user enable cokacdir", &r);
         if !r.status.success() {
             dlog!("systemd", "enable failed");
-            return Err("systemctl enable failed".into());
+            return Err(format!(
+                "systemctl --user enable failed ({})",
+                Self::output_detail(&r)
+            ));
         }
 
         // Truncate error log before starting so we only capture fresh errors
@@ -294,14 +522,16 @@ impl ServiceManager for SystemdManager {
         let _ = std::fs::File::create(&error_log_path);
 
         dlog!("systemd", "Restarting service...");
-        let r = Command::new("systemctl")
-            .args(["--user", "restart", SERVICE_NAME])
+        let r = Self::user_systemctl_cmd(["restart", SERVICE_NAME])
             .output()
             .map_err(|e| format!("restart failed: {}", e))?;
         crate::core::debug::log_output("systemd", "systemctl --user restart cokacdir", &r);
         if !r.status.success() {
             dlog!("systemd", "restart failed");
-            return Err("systemctl restart failed".into());
+            return Err(format!(
+                "systemctl --user restart failed ({})",
+                Self::output_detail(&r)
+            ));
         }
 
         if let Some(user) = std::env::var("USER").ok() {
@@ -338,15 +568,13 @@ impl ServiceManager for SystemdManager {
                 .collect::<Vec<_>>().join("\n");
             dlog!("systemd", "Service not running after restart. Error log tail:\n{}", tail.trim());
             // Also capture systemd's own view of the failed unit for root cause.
-            match Command::new("systemctl")
-                .args(["--user", "status", SERVICE_NAME, "--no-pager", "--lines=30"])
+            match Self::user_systemctl_cmd(["status", SERVICE_NAME, "--no-pager", "--lines=30"])
                 .output()
             {
                 Ok(out) => crate::core::debug::log_output("systemd", "systemctl --user status cokacdir (post-fail)", &out),
                 Err(e) => dlog!("systemd", "post-fail status query exec failed: {}", e),
             }
-            match Command::new("journalctl")
-                .args(["--user", "-u", SERVICE_NAME, "-n", "30", "--no-pager"])
+            match Self::user_journalctl_cmd(["-u", SERVICE_NAME, "-n", "30", "--no-pager"])
                 .output()
             {
                 Ok(out) => crate::core::debug::log_output("systemd", "journalctl --user -u cokacdir -n 30 (post-fail)", &out),
@@ -369,10 +597,7 @@ impl ServiceManager for SystemdManager {
         // depending on locale-specific stderr ("not loaded"/"not found") text
         // to distinguish "already absent" from real failures.
         if self.paths.service_file.exists() {
-            match Command::new("systemctl")
-                .args(["--user", "stop", SERVICE_NAME])
-                .output()
-            {
+            match Self::user_systemctl_cmd(["stop", SERVICE_NAME]).output() {
                 Ok(r) => {
                     crate::core::debug::log_output("systemd", "systemctl --user stop cokacdir", &r);
                     if !r.status.success() {
@@ -398,10 +623,14 @@ impl ServiceManager for SystemdManager {
         }
 
         // Always kill externally running cokacdir processes regardless of service stop result
-        dlog!("systemd", "stop(): killing external cokacdir processes via pkill...");
-        match Command::new("pkill").arg("cokacdir").output() {
+        dlog!("systemd", "stop(): killing external {} processes via pkill...", SERVICE_NAME);
+        match Command::new("pkill").arg(SERVICE_NAME).output() {
             Ok(out) => {
-                crate::core::debug::log_output("systemd", "pkill cokacdir", &out);
+                crate::core::debug::log_output(
+                    "systemd",
+                    &format!("pkill {}", SERVICE_NAME),
+                    &out,
+                );
                 dlog!("systemd", "stop(): pkill exit={} (0=killed, 1=none found)", out.status.code().unwrap_or(-1));
             }
             Err(e) => {
@@ -419,10 +648,7 @@ impl ServiceManager for SystemdManager {
         dlog!("systemd", "remove() called");
         let _ = self.stop();
         dlog!("systemd", "remove(): disabling service");
-        match Command::new("systemctl")
-            .args(["--user", "disable", SERVICE_NAME])
-            .output()
-        {
+        match Self::user_systemctl_cmd(["disable", SERVICE_NAME]).output() {
             Ok(out) => crate::core::debug::log_output("systemd", "systemctl --user disable cokacdir", &out),
             Err(e) => dlog!("systemd", "remove(): disable exec failed: {}", e),
         }
@@ -444,10 +670,7 @@ impl ServiceManager for SystemdManager {
             dlog!("systemd", "Wrapper script already absent: {}", self.paths.wrapper_script.display());
         }
         dlog!("systemd", "remove(): running daemon-reload");
-        match Command::new("systemctl")
-            .args(["--user", "daemon-reload"])
-            .output()
-        {
+        match Self::user_systemctl_cmd(["daemon-reload"]).output() {
             Ok(out) => crate::core::debug::log_output("systemd", "systemctl --user daemon-reload (remove)", &out),
             Err(e) => dlog!("systemd", "remove(): daemon-reload exec failed: {}", e),
         }
@@ -456,37 +679,76 @@ impl ServiceManager for SystemdManager {
     }
 
     fn status(&self) -> ServiceStatus {
-        dlog!("systemd", "status() called");
+        // Compute outcome silently, then log only on state transitions so the
+        // 5-second poll doesn't fill the debug log with identical lines.
+        // Same precheck as start(): if the user D-Bus socket is missing,
+        // every `systemctl --user` call below would just return the cryptic
+        // "Failed to connect to bus: No medium found". Surface a clearer
+        // line in the dashboard instead. (For non-path transports we can't
+        // precheck, so we fall through to the actual systemctl call.)
+        if let Some(bus_path) = Self::user_bus_socket_path() {
+            if !bus_path.exists() {
+                Self::log_status_transition(
+                    "bus_missing",
+                    &format!(
+                        "status(): user bus socket missing ({}) -> Unknown",
+                        bus_path.display()
+                    ),
+                );
+                return ServiceStatus::Unknown(Self::user_bus_missing_short());
+            }
+        }
         if !self.paths.service_file.exists() {
-            dlog!("systemd", "status(): service file not found -> NotInstalled");
+            Self::log_status_transition(
+                "not_installed",
+                "status(): service file not found -> NotInstalled",
+            );
             return ServiceStatus::NotInstalled;
         }
-        let output = Command::new("systemctl")
-            .args(["--user", "is-active", SERVICE_NAME])
-            .output();
+        let output = Self::user_systemctl_cmd(["is-active", SERVICE_NAME]).output();
         match output {
             Ok(out) => {
-                crate::core::debug::log_output("systemd", "systemctl --user is-active cokacdir", &out);
                 let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                dlog!("systemd", "status(): systemctl is-active = '{}'", state);
-                match state.as_str() {
+                let result = match state.as_str() {
                     "active" => ServiceStatus::Running,
                     "inactive" | "failed" => ServiceStatus::Stopped,
-                    _ => ServiceStatus::Unknown(state),
+                    _ => ServiceStatus::Unknown(Self::output_detail(&out)),
+                };
+                let key = format!("{:?}", result);
+                if Self::status_key_changed(&key) {
+                    crate::core::debug::log_output(
+                        "systemd",
+                        "systemctl --user is-active cokacdir",
+                        &out,
+                    );
+                    dlog!(
+                        "systemd",
+                        "status(): is-active='{}' -> {:?}",
+                        state,
+                        result
+                    );
                 }
+                result
             }
             Err(e) => {
-                dlog!("systemd", "status() query failed: {}", e);
+                Self::log_status_transition(
+                    "exec_failed",
+                    &format!("status() query failed: {}", e),
+                );
                 ServiceStatus::Unknown("Cannot query systemctl".into())
             }
         }
     }
 
     fn is_any_running(&self) -> bool {
-        dlog!("systemd", "is_any_running(): checking pgrep cokacdir...");
-        match Command::new("pgrep").arg("cokacdir").output() {
+        dlog!("systemd", "is_any_running(): checking pgrep {}...", SERVICE_NAME);
+        match Command::new("pgrep").arg(SERVICE_NAME).output() {
             Ok(output) => {
-                crate::core::debug::log_output("systemd", "pgrep cokacdir", &output);
+                crate::core::debug::log_output(
+                    "systemd",
+                    &format!("pgrep {}", SERVICE_NAME),
+                    &output,
+                );
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let pids = stdout.trim();
                 let found = output.status.success();

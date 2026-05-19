@@ -34,11 +34,15 @@ fn main() {
 }
 
 fn run_dashboard(port: u16, inbound: bool) {
+    dlog!("main", "run_dashboard: building tokio runtime");
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+    dlog!("main", "run_dashboard: tokio runtime ready, calling dashboard::serve");
     if let Err(e) = rt.block_on(dashboard::serve(port, inbound)) {
+        dlog!("main", "run_dashboard: serve returned err: {}", e);
         eprintln!("\x1b[31m  Dashboard error: {}\x1b[0m", e);
         std::process::exit(1);
     }
+    dlog!("main", "run_dashboard: serve returned ok");
 }
 
 fn run_cli(command: Commands) {

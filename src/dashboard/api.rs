@@ -25,7 +25,9 @@ const MAX_NAME_LEN: usize = 128;
 const MAX_PATH_LEN: usize = 1024;
 
 pub async fn handle(req: &Request, state: &SharedState) -> Response {
-    match (req.method.as_str(), req.path.as_str()) {
+    dlog!("api", "dispatch {} {} body={}B peer={}",
+          req.method, req.path, req.body.len(), req.peer);
+    let resp = match (req.method.as_str(), req.path.as_str()) {
         ("GET",  "/api/state")            => get_state(state).await,
         ("GET",  "/api/logs")             => get_logs().await,
         ("GET",  "/api/activity")         => get_activity(state).await,
@@ -40,41 +42,58 @@ pub async fn handle(req: &Request, state: &SharedState) -> Response {
         ("POST", "/api/tokens/toggle")    => post_token_toggle(state, &req.body).await,
         ("POST", "/api/tokens/delete")    => post_token_delete(state, &req.body).await,
         ("POST", "/api/binary-path")      => post_binary_path(state, &req.body).await,
-        _ => Response::not_found(),
-    }
+        _ => {
+            dlog!("api", "no handler for {} {}", req.method, req.path);
+            Response::not_found()
+        }
+    };
+    dlog!("api", "response {} {} -> {} ({}B)",
+          req.method, req.path, resp.status, resp.body.len());
+    resp
 }
 
 // ─── GET /api/state ────────────────────────────────────────────────────────
 
 async fn get_state(state: &SharedState) -> Response {
+    dlog!("api::state", "building state snapshot");
     let body = tokio::task::spawn_blocking({
         let state = state.clone();
         move || build_state_json(&state)
     })
     .await
-    .unwrap_or_else(|e| json!({ "error": format!("join: {}", e) }));
-
-    Response::ok_json(body.to_string())
+    .unwrap_or_else(|e| {
+        dlog!("api::state", "spawn_blocking join failed: {}", e);
+        json!({ "error": format!("join: {}", e) })
+    });
+    let s = body.to_string();
+    dlog!("api::state", "snapshot ready ({}B)", s.len());
+    Response::ok_json(s)
 }
 
 fn build_state_json(state: &SharedState) -> Value {
     let os = Os::detect();
     let config = Config::load();
+    dlog!("api::state", "os={:?} tokens={} disabled={}",
+          os, config.tokens.len(), config.disabled_tokens.len());
 
     let mgr = service::manager();
-    let svc_status = match mgr.status() {
+    let svc_status_raw = mgr.status();
+    let svc_status = match svc_status_raw {
         ServiceStatus::Running       => "running",
         ServiceStatus::Stopped       => "stopped",
         ServiceStatus::NotInstalled  => "not-installed",
         ServiceStatus::Unknown(_)    => "unknown",
     };
+    dlog!("api::state", "service status: {}", svc_status);
 
     let binary_path = platform::find_cokacdir()
         .map(|p| p.display().to_string());
+    dlog!("api::state", "binary path: {:?}", binary_path);
 
     let cokacdir_version = binary_path.as_ref().and_then(|p| {
         version::installed_version(std::path::Path::new(p))
     });
+    dlog!("api::state", "cokacdir version: {:?}", cokacdir_version);
 
     let svc_paths = platform::ServicePaths::for_current_os();
     let log_path = svc_paths.log_file.display().to_string();
@@ -190,16 +209,23 @@ fn derive_bot_handle(token: &str) -> String {
 // ─── GET /api/logs ─────────────────────────────────────────────────────────
 
 async fn get_logs() -> Response {
+    dlog!("api::logs", "reading service log");
     let body = tokio::task::spawn_blocking(|| {
         let mgr = service::manager();
         let path = match mgr.log_path() {
             Some(p) => p,
-            None => return json!({ "lines": [] }),
+            None => {
+                dlog!("api::logs", "log_path returned None");
+                return json!({ "lines": [] });
+            }
         };
         if !path.exists() {
+            dlog!("api::logs", "log file does not exist: {}", path.display());
             return json!({ "lines": [] });
         }
+        dlog!("api::logs", "loading from {}", path.display());
         let lines = crate::tui::log_viewer::load_log_lines(&path, 200);
+        dlog!("api::logs", "loaded {} lines", lines.len());
         let parsed: Vec<Value> = lines.iter().enumerate().map(|(i, raw)| {
             json!({
                 "id":     format!("l-{}-{}", i, raw.len()),
@@ -212,7 +238,10 @@ async fn get_logs() -> Response {
         json!({ "lines": parsed })
     })
     .await
-    .unwrap_or_else(|e| json!({ "error": format!("join: {}", e) }));
+    .unwrap_or_else(|e| {
+        dlog!("api::logs", "spawn_blocking join failed: {}", e);
+        json!({ "error": format!("join: {}", e) })
+    });
 
     Response::ok_json(body.to_string())
 }
@@ -230,6 +259,7 @@ fn classify_level(line: &str) -> &'static str {
 
 async fn get_activity(state: &SharedState) -> Response {
     let items = state.activity();
+    dlog!("api::activity", "returning {} items", items.len());
     Response::ok_json(json!({ "items": items }).to_string())
 }
 
@@ -238,6 +268,13 @@ async fn get_activity(state: &SharedState) -> Response {
 enum ServiceAction { Start, Stop, Restart, Remove }
 
 async fn post_service(state: &SharedState, action: ServiceAction) -> Response {
+    let action_name = match action {
+        ServiceAction::Start   => "start",
+        ServiceAction::Stop    => "stop",
+        ServiceAction::Restart => "restart",
+        ServiceAction::Remove  => "remove",
+    };
+    dlog!("api::service", "action={}", action_name);
     let state = state.clone();
     let result: Result<&'static str, String> = tokio::task::spawn_blocking(move || {
         let mgr = service::manager();
@@ -245,85 +282,136 @@ async fn post_service(state: &SharedState, action: ServiceAction) -> Response {
             ServiceAction::Start => {
                 let config = Config::load();
                 let tokens = config.active_tokens();
+                dlog!("api::service", "start: active_tokens={}", tokens.len());
                 if tokens.is_empty() {
+                    dlog!("api::service", "start: refused — no active tokens");
                     return Err("No active tokens. Add one from the Tokens page first.".into());
                 }
                 let bin = platform::find_cokacdir()
-                    .ok_or_else(|| "cokacdir is not installed. Install it first.".to_string())?;
-                mgr.start(&bin, &tokens)?;
+                    .ok_or_else(|| {
+                        dlog!("api::service", "start: refused — cokacdir not installed");
+                        "cokacdir is not installed. Install it first.".to_string()
+                    })?;
+                dlog!("api::service", "start: bin={}", bin.display());
+                mgr.start(&bin, &tokens).map_err(|e| {
+                    dlog!("api::service", "start: mgr.start failed: {}", e);
+                    e
+                })?;
                 state.mark_started();
                 state.push_activity("svc-start", "Service started",
                     &format!("Running with {} bot token(s)", tokens.len()), "green");
+                dlog!("api::service", "start: done");
                 Ok("Service started")
             }
             ServiceAction::Stop => {
-                mgr.stop()?;
+                mgr.stop().map_err(|e| {
+                    dlog!("api::service", "stop: mgr.stop failed: {}", e);
+                    e
+                })?;
                 state.mark_stopped();
                 state.push_activity("svc-stop", "Service stopped", "Manual stop", "red");
+                dlog!("api::service", "stop: done");
                 Ok("Service stopped")
             }
             ServiceAction::Restart => {
                 let config = Config::load();
                 let tokens = config.active_tokens();
+                dlog!("api::service", "restart: active_tokens={}", tokens.len());
                 if tokens.is_empty() {
+                    dlog!("api::service", "restart: refused — no active tokens");
                     return Err("No active tokens.".into());
                 }
                 let bin = platform::find_cokacdir()
-                    .ok_or_else(|| "cokacdir is not installed.".to_string())?;
-                mgr.restart(&bin, &tokens)?;
+                    .ok_or_else(|| {
+                        dlog!("api::service", "restart: refused — cokacdir not installed");
+                        "cokacdir is not installed.".to_string()
+                    })?;
+                dlog!("api::service", "restart: bin={}", bin.display());
+                mgr.restart(&bin, &tokens).map_err(|e| {
+                    dlog!("api::service", "restart: mgr.restart failed: {}", e);
+                    e
+                })?;
                 state.mark_started();
                 state.push_activity("svc-restart", "Service restarted",
                     &format!("{} bot token(s)", tokens.len()), "green");
+                dlog!("api::service", "restart: done");
                 Ok("Restarted")
             }
             ServiceAction::Remove => {
-                mgr.remove()?;
+                mgr.remove().map_err(|e| {
+                    dlog!("api::service", "remove: mgr.remove failed: {}", e);
+                    e
+                })?;
                 state.mark_stopped();
                 state.push_activity("svc-stop", "Service unregistered", "Removed from service manager", "red");
+                dlog!("api::service", "remove: done");
                 Ok("Service registration removed")
             }
         }
     })
     .await
-    .map_err(|e| format!("join: {}", e))
+    .map_err(|e| {
+        dlog!("api::service", "spawn_blocking join failed: {}", e);
+        format!("join: {}", e)
+    })
     .and_then(|r| r);
 
     match result {
-        Ok(msg) => Response::ok_json(json!({ "message": msg }).to_string()),
-        Err(e)  => Response::err_json(400, "Bad Request", e),
+        Ok(msg) => {
+            dlog!("api::service", "action={} -> OK ({})", action_name, msg);
+            Response::ok_json(json!({ "message": msg }).to_string())
+        }
+        Err(e) => {
+            dlog!("api::service", "action={} -> ERR: {}", action_name, e);
+            Response::err_json(400, "Bad Request", e)
+        }
     }
 }
 
 // ─── POST /api/install ─────────────────────────────────────────────────────
 
 async fn post_install(state: &SharedState) -> Response {
+    dlog!("api::install", "request received, trying lock");
     // Only one install/update may touch the cokacdir binary at a time.
     // try_lock so a double-click returns 409 immediately instead of queueing
     // the user behind a multi-minute download.
     let _guard = match state.binary_op_lock.try_lock() {
-        Ok(g) => g,
-        Err(_) => return Response::err_json(
-            409, "Conflict",
-            "An install or update is already in progress. Please wait for it to finish.".into(),
-        ),
+        Ok(g) => {
+            dlog!("api::install", "lock acquired");
+            g
+        }
+        Err(_) => {
+            dlog!("api::install", "lock contended -> 409");
+            return Response::err_json(
+                409, "Conflict",
+                "An install or update is already in progress. Please wait for it to finish.".into(),
+            );
+        }
     };
     // Use the run_bg path so install treats us as non-interactive (sudo -n).
     // Without this, an interactive sudo prompt would deadlock the request.
     let (tx, _rx) = drain_progress();
+    dlog!("api::install", "invoking install::run_bg");
     match crate::cli::install::run_bg(tx).await {
         Ok(_) => {
+            dlog!("api::install", "install::run_bg succeeded");
             state.push_activity("install", "cokacdir installed", "Latest version", "blue");
             Response::ok_json(json!({ "message": "cokacdir installed" }).to_string())
         }
-        Err(e) => Response::err_json(500, "Install Failed", e),
+        Err(e) => {
+            dlog!("api::install", "install::run_bg failed: {}", e);
+            Response::err_json(500, "Install Failed", e)
+        }
     }
 }
 
 // ─── POST /api/update/check ───────────────────────────────────────────────
 
 async fn post_check_update(state: &SharedState) -> Response {
+    dlog!("api::update_check", "begin");
     state.set_checking(true);
     let latest = version::latest_version().await;
+    dlog!("api::update_check", "latest_version -> {:?}", latest);
     state.set_latest_version(latest.clone());
     state.set_checking(false);
     Response::ok_json(json!({ "latestVersion": latest }).to_string())
@@ -332,14 +420,21 @@ async fn post_check_update(state: &SharedState) -> Response {
 // ─── POST /api/update/apply ───────────────────────────────────────────────
 
 async fn post_apply_update(state: &SharedState) -> Response {
+    dlog!("api::update_apply", "request received, trying lock");
     // Shares the mutex with /api/install — two concurrent runs would race on
     // the cokacdir binary.
     let _guard = match state.binary_op_lock.try_lock() {
-        Ok(g) => g,
-        Err(_) => return Response::err_json(
-            409, "Conflict",
-            "An install or update is already in progress. Please wait for it to finish.".into(),
-        ),
+        Ok(g) => {
+            dlog!("api::update_apply", "lock acquired");
+            g
+        }
+        Err(_) => {
+            dlog!("api::update_apply", "lock contended -> 409");
+            return Response::err_json(
+                409, "Conflict",
+                "An install or update is already in progress. Please wait for it to finish.".into(),
+            );
+        }
     };
     let old = tokio::task::spawn_blocking(|| {
         platform::find_cokacdir()
@@ -348,10 +443,13 @@ async fn post_apply_update(state: &SharedState) -> Response {
     .await
     .ok()
     .flatten();
+    dlog!("api::update_apply", "old version: {:?}", old);
 
     let (tx, _rx) = drain_progress();
+    dlog!("api::update_apply", "invoking update::run_bg");
     match crate::cli::update::run_bg(tx).await {
         Ok(_) => {
+            dlog!("api::update_apply", "update::run_bg succeeded");
             let new = tokio::task::spawn_blocking(|| {
                 platform::find_cokacdir()
                     .and_then(|p| version::installed_version(&p))
@@ -359,6 +457,7 @@ async fn post_apply_update(state: &SharedState) -> Response {
             .await
             .ok()
             .flatten();
+            dlog!("api::update_apply", "new version: {:?}", new);
             let meta = match (old, new) {
                 (Some(a), Some(b)) if a != b => format!("v{} → v{}", a, b),
                 (_, Some(b)) => format!("v{}", b),
@@ -367,7 +466,10 @@ async fn post_apply_update(state: &SharedState) -> Response {
             state.push_activity("update", "cokacdir updated", &meta, "blue");
             Response::ok_json(json!({ "message": "Updated" }).to_string())
         }
-        Err(e) => Response::err_json(500, "Update Failed", e),
+        Err(e) => {
+            dlog!("api::update_apply", "update::run_bg failed: {}", e);
+            Response::err_json(500, "Update Failed", e)
+        }
     }
 }
 
@@ -380,36 +482,53 @@ struct AddBot { token: String, #[serde(default)] name: Option<String> }
 struct BotIdRef { id: String }
 
 async fn post_token_add(state: &SharedState, body: &[u8]) -> Response {
+    dlog!("api::token_add", "body={}B", body.len());
     let req: AddBot = match parse_json(body) {
         Ok(r) => r,
-        Err(e) => return Response::err_json(400, "Bad Request", e),
+        Err(e) => {
+            dlog!("api::token_add", "parse failed: {}", e);
+            return Response::err_json(400, "Bad Request", e);
+        }
     };
     let token = req.token.trim().to_string();
     if let Err(e) = validate_token(&token) {
+        dlog!("api::token_add", "validate_token failed: {}", e);
         return Response::err_json(400, "Bad Request", e);
     }
     let name_opt = match req.name {
         Some(ref n) => match validate_name(n) {
             Ok(s) => s,
-            Err(e) => return Response::err_json(400, "Bad Request", e),
+            Err(e) => {
+                dlog!("api::token_add", "validate_name failed: {}", e);
+                return Response::err_json(400, "Bad Request", e);
+            }
         },
         None => None,
     };
+    dlog!("api::token_add", "token={} name={:?}", mask_token(&token), name_opt);
     let state_c = state.clone();
     let result: Result<(), String> = tokio::task::spawn_blocking(move || {
         let _cg = state_c.config_lock.lock().unwrap();
         let mut config = Config::load();
         if config.tokens.iter().any(|t| t == &token) {
+            dlog!("api::token_add", "duplicate token");
             return Err("Token already registered".into());
         }
         config.tokens.push(token.clone());
         if let Some(n) = name_opt {
             config.token_names.insert(token.clone(), n);
         }
-        config.save()?;
+        config.save().map_err(|e| {
+            dlog!("api::token_add", "config.save failed: {}", e);
+            e
+        })?;
         state_c.push_activity("bot-add", "Bot added", &mask_token(&token), "blue");
+        dlog!("api::token_add", "saved (total tokens now {})", config.tokens.len());
         Ok(())
-    }).await.unwrap_or_else(|e| Err(format!("join: {}", e)));
+    }).await.unwrap_or_else(|e| {
+        dlog!("api::token_add", "spawn_blocking join failed: {}", e);
+        Err(format!("join: {}", e))
+    });
     match result {
         Ok(_)  => Response::ok_json(json!({ "message": "Bot added" }).to_string()),
         Err(e) => Response::err_json(400, "Bad Request", e),
@@ -417,18 +536,26 @@ async fn post_token_add(state: &SharedState, body: &[u8]) -> Response {
 }
 
 async fn post_token_toggle(state: &SharedState, body: &[u8]) -> Response {
+    dlog!("api::token_toggle", "body={}B", body.len());
     let req: BotIdRef = match parse_json(body) {
         Ok(r) => r,
-        Err(e) => return Response::err_json(400, "Bad Request", e),
+        Err(e) => {
+            dlog!("api::token_toggle", "parse failed: {}", e);
+            return Response::err_json(400, "Bad Request", e);
+        }
     };
     let id = req.id;
+    dlog!("api::token_toggle", "id={}", id);
     let state_c = state.clone();
     let result: Result<bool, String> = tokio::task::spawn_blocking(move || {
         let _cg = state_c.config_lock.lock().unwrap();
         let mut config = Config::load();
         let token = match resolve_id(&config.tokens, &id) {
             Some(t) => t,
-            None => return Err("Unknown bot".into()),
+            None => {
+                dlog!("api::token_toggle", "unknown id");
+                return Err("Unknown bot".into());
+            }
         };
         let was_disabled = config.disabled_tokens.iter().any(|t| t == &token);
         if was_disabled {
@@ -436,8 +563,13 @@ async fn post_token_toggle(state: &SharedState, body: &[u8]) -> Response {
         } else {
             config.disabled_tokens.push(token.clone());
         }
-        config.save()?;
+        config.save().map_err(|e| {
+            dlog!("api::token_toggle", "config.save failed: {}", e);
+            e
+        })?;
         let now_disabled = !was_disabled;
+        dlog!("api::token_toggle", "token={} was_disabled={} now_disabled={}",
+              mask_token(&token), was_disabled, now_disabled);
         state_c.push_activity(
             if now_disabled { "bot-disable" } else { "bot-add" },
             if now_disabled { "Bot disabled" } else { "Bot enabled" },
@@ -445,7 +577,10 @@ async fn post_token_toggle(state: &SharedState, body: &[u8]) -> Response {
             if now_disabled { "" } else { "blue" },
         );
         Ok(now_disabled)
-    }).await.unwrap_or_else(|e| Err(format!("join: {}", e)));
+    }).await.unwrap_or_else(|e| {
+        dlog!("api::token_toggle", "spawn_blocking join failed: {}", e);
+        Err(format!("join: {}", e))
+    });
     match result {
         Ok(disabled) => Response::ok_json(json!({ "disabled": disabled }).to_string()),
         Err(e)       => Response::err_json(400, "Bad Request", e),
@@ -453,26 +588,42 @@ async fn post_token_toggle(state: &SharedState, body: &[u8]) -> Response {
 }
 
 async fn post_token_delete(state: &SharedState, body: &[u8]) -> Response {
+    dlog!("api::token_delete", "body={}B", body.len());
     let req: BotIdRef = match parse_json(body) {
         Ok(r) => r,
-        Err(e) => return Response::err_json(400, "Bad Request", e),
+        Err(e) => {
+            dlog!("api::token_delete", "parse failed: {}", e);
+            return Response::err_json(400, "Bad Request", e);
+        }
     };
     let id = req.id;
+    dlog!("api::token_delete", "id={}", id);
     let state_c = state.clone();
     let result: Result<(), String> = tokio::task::spawn_blocking(move || {
         let _cg = state_c.config_lock.lock().unwrap();
         let mut config = Config::load();
         let token = match resolve_id(&config.tokens, &id) {
             Some(t) => t,
-            None => return Err("Unknown bot".into()),
+            None => {
+                dlog!("api::token_delete", "unknown id");
+                return Err("Unknown bot".into());
+            }
         };
         config.tokens.retain(|t| t != &token);
         config.disabled_tokens.retain(|t| t != &token);
         config.token_names.remove(&token);
-        config.save()?;
+        config.save().map_err(|e| {
+            dlog!("api::token_delete", "config.save failed: {}", e);
+            e
+        })?;
+        dlog!("api::token_delete", "removed token={} (remaining {})",
+              mask_token(&token), config.tokens.len());
         state_c.push_activity("bot-remove", "Bot removed", &mask_token(&token), "red");
         Ok(())
-    }).await.unwrap_or_else(|e| Err(format!("join: {}", e)));
+    }).await.unwrap_or_else(|e| {
+        dlog!("api::token_delete", "spawn_blocking join failed: {}", e);
+        Err(format!("join: {}", e))
+    });
     match result {
         Ok(_)  => Response::ok_json(json!({ "message": "Bot removed" }).to_string()),
         Err(e) => Response::err_json(400, "Bad Request", e),
@@ -485,36 +636,51 @@ async fn post_token_delete(state: &SharedState, body: &[u8]) -> Response {
 struct BinaryPath { path: String }
 
 async fn post_binary_path(state: &SharedState, body: &[u8]) -> Response {
+    dlog!("api::binary_path", "body={}B", body.len());
     let req: BinaryPath = match parse_json(body) {
         Ok(r) => r,
-        Err(e) => return Response::err_json(400, "Bad Request", e),
+        Err(e) => {
+            dlog!("api::binary_path", "parse failed: {}", e);
+            return Response::err_json(400, "Bad Request", e);
+        }
     };
     let trimmed = req.path.trim().to_string();
+    dlog!("api::binary_path", "candidate path: {:?}", trimmed);
     // Cheap syntactic checks run on the async task. The filesystem existence
     // check lives inside the spawn_blocking below so a stat on a wedged
     // mount can't stall the tokio reactor.
     if let Err(e) = validate_path_syntax(&trimmed) {
+        dlog!("api::binary_path", "syntax check failed: {}", e);
         return Response::err_json(400, "Bad Request", e);
     }
     let state_c = state.clone();
     let result: Result<(), String> = tokio::task::spawn_blocking(move || {
         if let Err(e) = validate_path_exists(&trimmed) {
+            dlog!("api::binary_path", "exists check failed: {}", e);
             return Err(e);
         }
         let _cg = state_c.config_lock.lock().unwrap();
         let mut config = Config::load();
         let meta = if trimmed.is_empty() {
             config.install_path = None;
+            dlog!("api::binary_path", "auto-detect enabled");
             "Auto-detect enabled".to_string()
         } else {
             let m = trimmed.clone();
             config.install_path = Some(trimmed);
+            dlog!("api::binary_path", "install_path set to {}", m);
             m
         };
-        config.save()?;
+        config.save().map_err(|e| {
+            dlog!("api::binary_path", "config.save failed: {}", e);
+            e
+        })?;
         state_c.push_activity("install", "Binary path changed", &meta, "blue");
         Ok(())
-    }).await.unwrap_or_else(|e| Err(format!("join: {}", e)));
+    }).await.unwrap_or_else(|e| {
+        dlog!("api::binary_path", "spawn_blocking join failed: {}", e);
+        Err(format!("join: {}", e))
+    });
     match result {
         Ok(_)  => Response::ok_json(json!({ "message": "Saved" }).to_string()),
         Err(e) => Response::err_json(400, "Bad Request", e),

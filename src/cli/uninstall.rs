@@ -4,13 +4,20 @@ use std::path::PathBuf;
 use std::process::Command;
 
 pub fn run(skip_confirm: bool) -> Result<(), String> {
-    let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
+    dlog!("uninstall", "run(skip_confirm={})", skip_confirm);
+    let home = dirs::home_dir().ok_or_else(|| {
+        dlog!("uninstall", "home_dir() returned None");
+        "Cannot determine home directory"
+    })?;
     let os = Os::detect();
+    dlog!("uninstall", "home={} os={:?}", home.display(), os);
 
     // Collect paths and check what exists
     let (files, dirs) = collect_paths(&home, os);
     let existing_files: Vec<&PathBuf> = files.iter().filter(|p| p.exists()).collect();
     let existing_dirs: Vec<&PathBuf> = dirs.iter().filter(|p| p.exists()).collect();
+    dlog!("uninstall", "candidate files={} (exist {}), dirs={} (exist {})",
+          files.len(), existing_files.len(), dirs.len(), existing_dirs.len());
 
     // Show what will happen
     println!();
@@ -46,12 +53,20 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
         std::io::stdout().flush().ok();
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)
-            .map_err(|e| format!("Failed to read input: {}", e))?;
-        if !matches!(input.trim(), "y" | "Y") {
+            .map_err(|e| {
+                dlog!("uninstall", "stdin read failed: {}", e);
+                format!("Failed to read input: {}", e)
+            })?;
+        let trimmed = input.trim();
+        dlog!("uninstall", "user confirmation input: {:?}", trimmed);
+        if !matches!(trimmed, "y" | "Y") {
+            dlog!("uninstall", "cancelled by user");
             println!("  Cancelled.");
             return Ok(());
         }
         println!();
+    } else {
+        dlog!("uninstall", "confirmation skipped via --yes");
     }
 
     // Phase 1: Stop and unregister services

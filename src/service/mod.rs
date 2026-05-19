@@ -32,9 +32,15 @@ pub trait ServiceManager: Send + Sync {
     fn stop(&self) -> Result<(), String>;
     /// Restart the service (stop + start with existing config).
     fn restart(&self, binary_path: &Path, tokens: &[String]) -> Result<(), String> {
-        dlog!("service", "restart: stop + start");
-        self.stop().ok(); // may already be stopped
-        self.start(binary_path, tokens)
+        dlog!("service", "restart: stop + start (bin={}, tokens={})",
+              binary_path.display(), tokens.len());
+        match self.stop() {
+            Ok(_)  => dlog!("service", "restart: stop ok"),
+            Err(e) => dlog!("service", "restart: stop returned err (continuing): {}", e),
+        }
+        let r = self.start(binary_path, tokens);
+        dlog!("service", "restart: start result is_ok={}", r.is_ok());
+        r
     }
     /// Remove the service entirely.
     fn remove(&self) -> Result<(), String>;
@@ -48,9 +54,7 @@ pub trait ServiceManager: Send + Sync {
 
 /// Get the appropriate ServiceManager for the current OS.
 pub fn manager() -> Box<dyn ServiceManager + Send + Sync> {
-    let os = crate::core::platform::Os::detect();
-    dlog!("service", "Creating service manager for: {:?}", os);
-    match os {
+    match crate::core::platform::Os::detect() {
         crate::core::platform::Os::MacOS => Box::new(launchd::LaunchdManager::new()),
         crate::core::platform::Os::Linux => Box::new(systemd::SystemdManager::new()),
         crate::core::platform::Os::Windows => {

@@ -28,13 +28,6 @@ pub fn draw(f: &mut Frame, app: &App) {
             f.buffer_mut().get_mut(x, y).reset();
         }
     }
-    dlog!(
-        "draw",
-        "frame {}x{} view={:?}",
-        area.width,
-        area.height,
-        app.view
-    );
     match app.view {
         View::Welcome => draw_welcome(f, app),
         View::TokenInput => draw_token_input(f, app),
@@ -136,7 +129,21 @@ fn draw_service_panel(f: &mut Frame, app: &App, area: Rect) {
             ServiceStatus::Running => (GREEN, "● Running".to_string()),
             ServiceStatus::Stopped => (RED, "○ Stopped".to_string()),
             ServiceStatus::NotInstalled => (DIM, "○ Not installed".to_string()),
-            ServiceStatus::Unknown(_) => (YELLOW, "? Unknown".to_string()),
+            ServiceStatus::Unknown(reason) => {
+                // Take only the first non-empty line so multi-line stderr
+                // from `systemctl is-active` (or any other source) can't
+                // break the single-line status row layout.
+                let suffix = reason
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("");
+                if suffix.is_empty() {
+                    (YELLOW, "? Unknown".to_string())
+                } else {
+                    (YELLOW, format!("? Unknown: {}", suffix))
+                }
+            }
         }
     };
 
