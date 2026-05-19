@@ -242,6 +242,7 @@ fn run_tui() {
 
         app.poll_progress();
         app.poll_service_action();
+        app.poll_status_update();
         app.expire_status();
 
         if app.checking_update {
@@ -280,8 +281,9 @@ fn run_tui() {
                 app.log_lines.len(),
                 app.log_scroll_offset
             );
-            dlog!("tui", "Periodic status refresh (tick {})", tick_count);
-            app.refresh_status();
+            // Status refresh now runs on the background status thread
+            // (spawned in App::new) on a 5-second timer, so the main loop
+            // no longer issues blocking PowerShell/tasklist calls here.
         }
     }
 

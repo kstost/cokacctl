@@ -3,6 +3,17 @@ use crate::core::platform;
 use crate::core::version;
 use crate::core::ProgressMsg;
 use crate::service::{self, ServiceStatus};
+use std::sync::mpsc;
+
+/// Result of an asynchronous service-status query.
+///
+/// Produced by the background status thread; consumed by the TUI main loop.
+/// Keeping this off the main thread avoids blocking the UI for the 1–3 s that
+/// `Get-ScheduledTask` / `tasklist` take to spawn on Windows.
+pub struct StatusUpdate {
+    pub service_status: ServiceStatus,
+    pub running_token_count: Option<usize>,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum View {
@@ -49,6 +60,11 @@ pub struct App {
     pub service_busy_label: String,
     pub service_busy_tick: usize,
     pub service_action_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    /// Receives `StatusUpdate`s produced by the background status thread.
+    pub status_update_rx: Option<mpsc::Receiver<StatusUpdate>>,
+    /// Sends "please refresh now" pings to the background status thread.
+    /// Send errors (channel closed) are ignored — the thread exits when App drops.
+    pub status_refresh_tx: Option<mpsc::Sender<()>>,
     // Binary path input state
     pub binary_path_input: String,
     // Progress view state
@@ -73,14 +89,61 @@ impl App {
             .and_then(|p| version::installed_version(p));
         dlog!("app", "cokacdir_version: {:?}", cokacdir_version);
 
-        dlog!("app", "Querying initial service status...");
-        let service_status = service::manager().status();
-        dlog!("app", "Service status: {:?}", service_status);
-        let running_token_count = if service_status == ServiceStatus::Running {
-            platform::ServicePaths::for_current_os().running_token_count()
-        } else {
-            None
-        };
+        // Start status polling in the background.
+        // On Windows, `status()` shells out to PowerShell + tasklist (1–3s).
+        // Doing it here would block the first TUI frame; doing it every 25
+        // ticks on the main thread blocks input. The background thread polls
+        // every 5 s and also services explicit refresh requests.
+        dlog!("app", "Spawning background status thread...");
+        let (status_update_tx, status_update_rx) = mpsc::channel::<StatusUpdate>();
+        let (status_refresh_tx, status_refresh_rx) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            dlog!("app::status_thread", "started");
+            loop {
+                let t0 = std::time::Instant::now();
+                let service_status = service::manager().status();
+                let running_token_count = if service_status == ServiceStatus::Running {
+                    platform::ServicePaths::for_current_os().running_token_count()
+                } else {
+                    None
+                };
+                dlog!(
+                    "app::status_thread",
+                    "polled in {:?}: status={:?} rtc={:?}",
+                    t0.elapsed(),
+                    service_status,
+                    running_token_count
+                );
+                if status_update_tx
+                    .send(StatusUpdate {
+                        service_status,
+                        running_token_count,
+                    })
+                    .is_err()
+                {
+                    dlog!("app::status_thread", "rx dropped, exiting");
+                    return;
+                }
+                // Wait for either an explicit refresh trigger or the 5-second
+                // periodic tick. Drain any extra pending triggers so a burst
+                // of requests only causes one extra poll.
+                match status_refresh_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                    Ok(()) => {
+                        while status_refresh_rx.try_recv().is_ok() {}
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        dlog!("app::status_thread", "trigger tx dropped, exiting");
+                        return;
+                    }
+                }
+            }
+        });
+
+        // Initial placeholder until the first StatusUpdate arrives.
+        // Renders as "Unknown (Checking...)" in the dashboard.
+        let service_status = ServiceStatus::Unknown("Checking...".into());
+        let running_token_count = None;
 
         let initial_view = if cokacdir_path.is_some() {
             View::Dashboard
@@ -115,28 +178,70 @@ impl App {
             service_busy_label: String::new(),
             service_busy_tick: 0,
             service_action_rx: None,
+            status_update_rx: Some(status_update_rx),
+            status_refresh_tx: Some(status_refresh_tx),
             binary_path_input: String::new(),
         }
     }
 
+    /// Ask the background status thread for a fresh service status, and
+    /// reload the config synchronously (config is a small local JSON file).
+    ///
+    /// This used to call `service::manager().status()` directly, which on
+    /// Windows blocks the UI for 1–3 s spawning PowerShell + tasklist. Now
+    /// the heavy work happens off-thread and the result arrives later via
+    /// `poll_status_update()`.
     pub fn refresh_status(&mut self) {
-        dlog!("app", "refresh_status()");
-        self.service_status = service::manager().status();
-        dlog!("app", "Service status: {:?}", self.service_status);
+        dlog!("app", "refresh_status() — pinging status thread");
+        if let Some(tx) = &self.status_refresh_tx {
+            let _ = tx.send(());
+        }
         self.config = Config::load();
         dlog!("app", "Config loaded: total={} active={} disabled={}",
             self.config.tokens.len(),
             self.config.active_tokens().len(),
             self.config.disabled_tokens.len());
-        self.running_token_count = if self.service_status == ServiceStatus::Running {
-            let rtc = platform::ServicePaths::for_current_os().running_token_count();
-            dlog!("app", "running_token_count result: {:?}", rtc);
-            rtc
-        } else {
-            dlog!("app", "running_token_count: None (not Running)");
-            None
-        };
-        dlog!("app", "final token_count() = {}", self.token_count());
+    }
+
+    /// Drain pending status updates from the background thread.
+    /// Returns true if at least one update was applied.
+    pub fn poll_status_update(&mut self) -> bool {
+        let mut applied = false;
+        let mut disconnected = false;
+        // Borrow `status_update_rx` only inside this `if let` so the borrow is
+        // released before we (potentially) write to the same field below.
+        // Mutating `service_status` / `running_token_count` inside the loop is
+        // OK because Rust's disjoint-field borrow rule treats them as separate
+        // fields from `status_update_rx`.
+        if let Some(rx) = self.status_update_rx.as_ref() {
+            loop {
+                match rx.try_recv() {
+                    Ok(update) => {
+                        self.service_status = update.service_status;
+                        self.running_token_count = update.running_token_count;
+                        applied = true;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if disconnected {
+            dlog!("app", "status thread disconnected");
+            self.status_update_rx = None;
+        }
+        if applied {
+            dlog!(
+                "app",
+                "status update applied: status={:?} rtc={:?}",
+                self.service_status,
+                self.running_token_count
+            );
+        }
+        applied
     }
 
     pub fn refresh_cokacdir_info(&mut self) {
