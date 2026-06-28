@@ -227,7 +227,7 @@ impl SystemdManager {
 
     fn direct_status(&self, cause: &str) -> ServiceStatus {
         let reason = Self::service_manager_unavailable_short(cause);
-        if self.direct_managed_process_running() {
+        if self.direct_managed_process_running() || Self::cokacdir_process_running(false) {
             ServiceStatus::DirectRunning(reason)
         } else {
             ServiceStatus::DirectStopped(reason)
@@ -275,18 +275,38 @@ impl SystemdManager {
             .map_err(|e| format!("Cannot finalize direct pid file: {}", e))
     }
 
+    fn proc_status_is_zombie(status: &str) -> bool {
+        status
+            .lines()
+            .find(|line| line.starts_with("State:"))
+            .map(|line| line.split_whitespace().nth(1) == Some("Z"))
+            .unwrap_or(false)
+    }
+
+    fn proc_status_matches_current_uid(status: &str, current_uid: u32) -> bool {
+        if current_uid == 0 {
+            return true;
+        }
+
+        status
+            .lines()
+            .find(|line| line.starts_with("Uid:"))
+            .map(|line| {
+                line.split_whitespace()
+                    .skip(1)
+                    .filter_map(|field| field.parse::<u32>().ok())
+                    .any(|uid| uid == current_uid)
+            })
+            .unwrap_or(false)
+    }
+
     fn pid_running(pid: u32) -> bool {
         let proc_dir = format!("/proc/{}", pid);
         if !Path::new(&proc_dir).exists() {
             return false;
         }
         if let Ok(status) = std::fs::read_to_string(format!("{}/status", proc_dir)) {
-            if status
-                .lines()
-                .find(|line| line.starts_with("State:"))
-                .map(|line| line.split_whitespace().nth(1) == Some("Z"))
-                .unwrap_or(false)
-            {
+            if Self::proc_status_is_zombie(&status) {
                 return false;
             }
         }
@@ -626,45 +646,128 @@ impl SystemdManager {
             let _ = std::fs::remove_file(self.direct_pid_file());
         }
 
+        if Self::cokacdir_process_running(false) {
+            dlog!(
+                "systemd",
+                "direct_stop(): found unmanaged {} process(es), terminating",
+                SERVICE_NAME
+            );
+            Self::terminate_cokacdir_processes("direct stop cleanup")?;
+        }
+
         Ok(())
     }
 
-    fn cokacdir_process_running(log: bool) -> bool {
+    fn cokacdir_process_pids(log: bool) -> Vec<u32> {
         if log {
             dlog!(
                 "systemd",
-                "is_any_running(): checking pgrep {}...",
+                "is_any_running(): scanning /proc for current-user {} processes...",
                 SERVICE_NAME
             );
         }
-        match Command::new("pgrep").args(["-x", SERVICE_NAME]).output() {
-            Ok(output) => {
-                if log {
-                    crate::core::debug::log_output(
-                        "systemd",
-                        &format!("pgrep -x {}", SERVICE_NAME),
-                        &output,
-                    );
-                }
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let pids = stdout.trim();
-                let found = output.status.success();
-                if log {
-                    dlog!(
-                        "systemd",
-                        "is_any_running(): pgrep exit={}, pids='{}', found={}",
-                        output.status.code().unwrap_or(-1),
-                        pids,
-                        found
-                    );
-                }
-                found
-            }
+
+        let current_uid = Self::current_uid();
+        let mut pids = Vec::new();
+        let entries = match std::fs::read_dir("/proc") {
+            Ok(entries) => entries,
             Err(e) => {
                 if log {
-                    dlog!("systemd", "is_any_running(): pgrep failed: {}", e);
+                    dlog!("systemd", "is_any_running(): cannot read /proc: {}", e);
                 }
-                false
+                return pids;
+            }
+        };
+
+        for entry in entries.flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+            else {
+                continue;
+            };
+
+            let proc_dir = entry.path();
+            let Ok(status) = std::fs::read_to_string(proc_dir.join("status")) else {
+                continue;
+            };
+            if Self::proc_status_is_zombie(&status)
+                || !Self::proc_status_matches_current_uid(&status, current_uid)
+            {
+                continue;
+            }
+
+            let Ok(comm) = std::fs::read_to_string(proc_dir.join("comm")) else {
+                continue;
+            };
+            if comm.trim() == SERVICE_NAME {
+                pids.push(pid);
+            }
+        }
+
+        pids.sort_unstable();
+        if log {
+            dlog!(
+                "systemd",
+                "is_any_running(): pids={:?}, found={}",
+                pids,
+                !pids.is_empty()
+            );
+        }
+        pids
+    }
+
+    fn cokacdir_process_running(log: bool) -> bool {
+        !Self::cokacdir_process_pids(log).is_empty()
+    }
+
+    fn terminate_cokacdir_processes(cause: &str) -> Result<(), String> {
+        let pids = Self::cokacdir_process_pids(false);
+        if pids.is_empty() {
+            return Ok(());
+        }
+
+        dlog!(
+            "systemd",
+            "terminating {} process(es) for {}: {:?}",
+            SERVICE_NAME,
+            cause,
+            pids
+        );
+        let mut errors = Vec::new();
+        for pid in pids {
+            if let Err(e) = Self::terminate_pid(pid) {
+                errors.push(e);
+            }
+        }
+
+        let remaining = Self::cokacdir_process_pids(false);
+        if !remaining.is_empty() {
+            errors.push(format!(
+                "{} pid(s) still running after cleanup: {:?}",
+                SERVICE_NAME, remaining
+            ));
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
+    fn kill_external_cokacdir_processes(&self) -> Result<(), String> {
+        dlog!(
+            "systemd",
+            "stop(): killing external {} processes...",
+            SERVICE_NAME
+        );
+        match Self::terminate_cokacdir_processes("systemd stop cleanup") {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                dlog!("systemd", "stop(): external process cleanup failed: {}", e);
+                Err(e)
             }
         }
     }
@@ -1201,23 +1304,9 @@ impl ServiceManager for SystemdManager {
             );
         }
 
-        // Always kill externally running cokacdir processes regardless of service stop result
-        dlog!(
-            "systemd",
-            "stop(): killing external {} processes via pkill...",
-            SERVICE_NAME
-        );
-        match Command::new("pkill").arg(SERVICE_NAME).output() {
-            Ok(out) => {
-                crate::core::debug::log_output("systemd", &format!("pkill {}", SERVICE_NAME), &out);
-                dlog!(
-                    "systemd",
-                    "stop(): pkill exit={} (0=killed, 1=none found)",
-                    out.status.code().unwrap_or(-1)
-                );
-            }
-            Err(e) => {
-                dlog!("systemd", "stop(): pkill failed: {}", e);
+        if let Err(e) = self.kill_external_cokacdir_processes() {
+            if service_err.is_none() {
+                service_err = Some(format!("process cleanup failed: {}", e));
             }
         }
 
@@ -1439,5 +1528,23 @@ mod tests {
             &wrong_args,
             &record
         ));
+    }
+
+    #[test]
+    fn proc_status_zombie_detection_uses_state_code() {
+        let running = "Name:\tcokacdir\nState:\tS (sleeping)\nUid:\t1000\t1000\t1000\t1000\n";
+        let zombie = "Name:\tcokacdir\nState:\tZ (zombie)\nUid:\t1000\t1000\t1000\t1000\n";
+
+        assert!(!SystemdManager::proc_status_is_zombie(running));
+        assert!(SystemdManager::proc_status_is_zombie(zombie));
+    }
+
+    #[test]
+    fn proc_status_uid_matching_accepts_current_user_or_root() {
+        let status = "Name:\tcokacdir\nState:\tS (sleeping)\nUid:\t1000\t1001\t1002\t1003\n";
+
+        assert!(SystemdManager::proc_status_matches_current_uid(status, 0));
+        assert!(SystemdManager::proc_status_matches_current_uid(status, 1001));
+        assert!(!SystemdManager::proc_status_matches_current_uid(status, 2000));
     }
 }
