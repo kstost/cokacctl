@@ -1,6 +1,6 @@
 use crate::core::platform::Os;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub fn run(skip_confirm: bool) -> Result<(), String> {
@@ -16,8 +16,14 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
     let (files, dirs) = collect_paths(&home, os);
     let existing_files: Vec<&PathBuf> = files.iter().filter(|p| p.exists()).collect();
     let existing_dirs: Vec<&PathBuf> = dirs.iter().filter(|p| p.exists()).collect();
-    dlog!("uninstall", "candidate files={} (exist {}), dirs={} (exist {})",
-          files.len(), existing_files.len(), dirs.len(), existing_dirs.len());
+    dlog!(
+        "uninstall",
+        "candidate files={} (exist {}), dirs={} (exist {})",
+        files.len(),
+        existing_files.len(),
+        dirs.len(),
+        existing_dirs.len()
+    );
 
     // Show what will happen
     println!();
@@ -52,8 +58,7 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
         print!("  Proceed? [y/N] ");
         std::io::stdout().flush().ok();
         let mut input = String::new();
-        std::io::stdin().read_line(&mut input)
-            .map_err(|e| {
+        std::io::stdin().read_line(&mut input).map_err(|e| {
                 dlog!("uninstall", "stdin read failed: {}", e);
                 format!("Failed to read input: {}", e)
             })?;
@@ -78,7 +83,10 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
                 let uid = unsafe { libc::getuid() };
                 let target = format!("gui/{}/com.cokacdir.server", uid);
                 dlog!("uninstall", "launchctl bootout {}", target);
-                match Command::new("launchctl").args(["bootout", &target]).output() {
+                match Command::new("launchctl")
+                    .args(["bootout", &target])
+                    .output()
+                {
                     Ok(out) => {
                         crate::core::debug::log_output("uninstall", "launchctl bootout", &out);
                         if out.status.success() {
@@ -100,7 +108,11 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
                 match Command::new("pkill").arg("cokacdir").output() {
                     Ok(out) => {
                         crate::core::debug::log_output("uninstall", "pkill cokacdir", &out);
-                        dlog!("uninstall", "pkill cokacdir exit={}", out.status.code().unwrap_or(-1));
+                        dlog!(
+                            "uninstall",
+                            "pkill cokacdir exit={}",
+                            out.status.code().unwrap_or(-1)
+                        );
                     }
                     Err(e) => {
                         dlog!("uninstall", "pkill cokacdir failed: {}", e);
@@ -110,9 +122,16 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
         }
         Os::Linux => {
             dlog!("uninstall", "systemctl --user stop cokacdir");
-            match Command::new("systemctl").args(["--user", "stop", "cokacdir"]).output() {
+            match Command::new("systemctl")
+                .args(["--user", "stop", "cokacdir"])
+                .output()
+            {
                 Ok(out) => {
-                    crate::core::debug::log_output("uninstall", "systemctl --user stop cokacdir", &out);
+                    crate::core::debug::log_output(
+                        "uninstall",
+                        "systemctl --user stop cokacdir",
+                        &out,
+                    );
                     if out.status.success() {
                         println!("    systemctl stop: OK");
                     } else {
@@ -126,9 +145,16 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
             }
 
             dlog!("uninstall", "systemctl --user disable cokacdir");
-            match Command::new("systemctl").args(["--user", "disable", "cokacdir"]).output() {
+            match Command::new("systemctl")
+                .args(["--user", "disable", "cokacdir"])
+                .output()
+            {
                 Ok(out) => {
-                    crate::core::debug::log_output("uninstall", "systemctl --user disable cokacdir", &out);
+                    crate::core::debug::log_output(
+                        "uninstall",
+                        "systemctl --user disable cokacdir",
+                        &out,
+                    );
                     if out.status.success() {
                         println!("    systemctl disable: OK");
                     } else {
@@ -146,7 +172,11 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
             match Command::new("pkill").arg("cokacdir").output() {
                 Ok(out) => {
                     crate::core::debug::log_output("uninstall", "pkill cokacdir", &out);
-                    dlog!("uninstall", "pkill cokacdir exit={}", out.status.code().unwrap_or(-1));
+                    dlog!(
+                        "uninstall",
+                        "pkill cokacdir exit={}",
+                        out.status.code().unwrap_or(-1)
+                    );
                 }
                 Err(e) => {
                     dlog!("uninstall", "pkill cokacdir failed: {}", e);
@@ -158,13 +188,22 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
             {
                 use std::os::windows::process::CommandExt;
                 let mut ps = Command::new("powershell");
-                ps.args(["-NoProfile", "-NonInteractive", "-Command",
-                    "Stop-ScheduledTask -TaskName 'cokacdir' -ErrorAction SilentlyContinue"]);
+                ps.args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "Stop-ScheduledTask -TaskName 'cokacdir' -ErrorAction SilentlyContinue",
+                ]);
                 ps.creation_flags(0x08000000);
                 match ps.output() {
                     Ok(out) => {
                         let stderr = String::from_utf8_lossy(&out.stderr);
-                        dlog!("uninstall", "Stop-ScheduledTask exit={}, stderr='{}'", out.status, stderr.trim());
+                        dlog!(
+                            "uninstall",
+                            "Stop-ScheduledTask exit={}, stderr='{}'",
+                            out.status,
+                            stderr.trim()
+                        );
                     }
                     Err(e) => {
                         dlog!("uninstall", "Stop-ScheduledTask failed: {}", e);
@@ -176,7 +215,11 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
                 cmd.creation_flags(0x08000000);
                 match cmd.output() {
                     Ok(out) => {
-                        crate::core::debug::log_output("uninstall", "schtasks /Delete /TN cokacdir /F", &out);
+                        crate::core::debug::log_output(
+                            "uninstall",
+                            "schtasks /Delete /TN cokacdir /F",
+                            &out,
+                        );
                         if out.status.success() {
                             println!("    schtasks delete: OK");
                         } else {
@@ -189,7 +232,10 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
                     }
                 }
 
-                dlog!("uninstall", "Killing all cokacdir* processes via PowerShell...");
+                dlog!(
+                    "uninstall",
+                    "Killing all cokacdir* processes via PowerShell..."
+                );
                 let mut ps_kill = Command::new("powershell");
                 ps_kill.args(["-NoProfile", "-NonInteractive", "-Command",
                     "Get-Process | Where-Object { $_.ProcessName -like 'cokacdir*' } | ForEach-Object { Write-Output \"Killing PID=$($_.Id) Name=$($_.ProcessName)\"; Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }"]);
@@ -198,8 +244,13 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
                     Ok(out) => {
                         let stdout = String::from_utf8_lossy(&out.stdout);
                         let stderr = String::from_utf8_lossy(&out.stderr);
-                        dlog!("uninstall", "kill cokacdir* exit={}, stdout='{}', stderr='{}'",
-                            out.status, stdout.trim(), stderr.trim());
+                        dlog!(
+                            "uninstall",
+                            "kill cokacdir* exit={}, stdout='{}', stderr='{}'",
+                            out.status,
+                            stdout.trim(),
+                            stderr.trim()
+                        );
                     }
                     Err(e) => {
                         dlog!("uninstall", "kill cokacdir* failed: {}", e);
@@ -224,12 +275,14 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
                     dlog!("uninstall", "Removed: {}", path.display());
                     println!("    rm {}  ...OK", path.display());
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied
-                    && os != Os::Windows =>
-                {
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && os != Os::Windows => {
                     // /usr/local/bin/cokacdir typically requires root to remove;
                     // try sudo as a fallback so uninstall actually succeeds.
-                    dlog!("uninstall", "Permission denied for {}, retrying with sudo", path.display());
+                    dlog!(
+                        "uninstall",
+                        "Permission denied for {}, retrying with sudo",
+                        path.display()
+                    );
                     let label = format!("sudo rm -f {}", path.display());
                     let status = Command::new("sudo")
                         .args(["rm", "-f", &path.to_string_lossy()])
@@ -241,7 +294,12 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
                                 dlog!("uninstall", "Removed via sudo: {}", path.display());
                                 println!("    rm {} (sudo)  ...OK", path.display());
                             } else {
-                                dlog!("uninstall", "sudo rm exit {:?}: {}", s.code(), path.display());
+                                dlog!(
+                                    "uninstall",
+                                    "sudo rm exit {:?}: {}",
+                                    s.code(),
+                                    path.display()
+                                );
                                 println!(
                                     "    rm {} (sudo)  ...failed (exit {:?})",
                                     path.display(),
@@ -251,7 +309,12 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
                         }
                         Err(se) => {
                             dlog!("uninstall", "sudo rm could not run: {}", se);
-                            println!("    rm {}  ...failed ({}, sudo unavailable: {})", path.display(), e, se);
+                            println!(
+                                "    rm {}  ...failed ({}, sudo unavailable: {})",
+                                path.display(),
+                                e,
+                                se
+                            );
                         }
                     }
                 }
@@ -281,8 +344,13 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
     // Phase 3: Reload systemd to clear stale unit cache
     if os == Os::Linux {
         dlog!("uninstall", "systemctl --user daemon-reload");
-        match Command::new("systemctl").args(["--user", "daemon-reload"]).output() {
-            Ok(out) => crate::core::debug::log_output("uninstall", "systemctl --user daemon-reload", &out),
+        match Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .output()
+        {
+            Ok(out) => {
+                crate::core::debug::log_output("uninstall", "systemctl --user daemon-reload", &out)
+            }
             Err(e) => dlog!("uninstall", "daemon-reload exec failed: {}", e),
         }
     }
@@ -292,7 +360,7 @@ pub fn run(skip_confirm: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn collect_paths(home: &PathBuf, os: Os) -> (Vec<PathBuf>, Vec<PathBuf>) {
+fn collect_paths(home: &Path, os: Os) -> (Vec<PathBuf>, Vec<PathBuf>) {
     match os {
         Os::MacOS | Os::Linux => {
             let mut dirs = vec![
@@ -321,10 +389,7 @@ fn collect_paths(home: &PathBuf, os: Os) -> (Vec<PathBuf>, Vec<PathBuf>) {
                 home.join("cokacdir.exe"),
                 home.join(".cokacdir/windows-service.json"),
             ],
-            vec![
-                home.join(".cokacdir/logs"),
-                home.join(".cokacdir/scripts"),
-            ],
+            vec![home.join(".cokacdir/logs"), home.join(".cokacdir/scripts")],
         ),
     }
 }

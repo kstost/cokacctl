@@ -14,7 +14,13 @@ pub fn handle_events(app: &mut App) -> bool {
             if key.kind != KeyEventKind::Press {
                 return true;
             }
-            dlog!("event", "Key: {:?} (modifiers: {:?}), view: {:?}", key.code, key.modifiers, app.view);
+            dlog!(
+                "event",
+                "Key: {:?} (modifiers: {:?}), view: {:?}",
+                key.code,
+                key.modifiers,
+                app.view
+            );
             return handle_key(app, key);
         }
     }
@@ -71,8 +77,17 @@ fn handle_progress_key(app: &mut App, key: KeyEvent) -> bool {
             // Only respond to keys when operation is done
             if app.progress_done.is_some() {
                 let was_install = app.progress_action == Some(ProgressAction::Install);
-                let succeeded = app.progress_done.as_ref().map(|r| r.is_ok()).unwrap_or(false);
-                dlog!("event", "Progress done - was_install: {}, succeeded: {}", was_install, succeeded);
+                let succeeded = app
+                    .progress_done
+                    .as_ref()
+                    .map(|r| r.is_ok())
+                    .unwrap_or(false);
+                dlog!(
+                    "event",
+                    "Progress done - was_install: {}, succeeded: {}",
+                    was_install,
+                    succeeded
+                );
 
                 app.refresh_cokacdir_info();
                 app.progress_rx = None;
@@ -105,22 +120,42 @@ fn handle_progress_key(app: &mut App, key: KeyEvent) -> bool {
 fn handle_token_input_key(app: &mut App, key: KeyEvent) -> bool {
     match key.code {
         KeyCode::Esc => {
-            dlog!("event", "TokenInput: Esc - saving {} tokens", app.token_list.len());
+            dlog!(
+                "event",
+                "TokenInput: Esc - saving {} tokens",
+                app.token_list.len()
+            );
             dlog!("event", "  disabled: {:?}", app.token_disabled);
-            dlog!("event", "  service_status before save: {:?}", app.service_status);
-            dlog!("event", "  running_token_count before save: {:?}", app.running_token_count);
+            dlog!(
+                "event",
+                "  service_status before save: {:?}",
+                app.service_status
+            );
+            dlog!(
+                "event",
+                "  running_token_count before save: {:?}",
+                app.running_token_count
+            );
             // Save token changes to config
             let mut config = Config::load();
             config.tokens = app.token_list.clone();
-            config.disabled_tokens = app.token_list.iter()
+            config.disabled_tokens = app
+                .token_list
+                .iter()
                 .zip(app.token_disabled.iter())
                 .filter_map(|(t, &disabled)| if disabled { Some(t.clone()) } else { None })
                 .collect();
+            config.token_names = app.config.token_names.clone();
             config.token_names.retain(|t, _| config.tokens.contains(t));
-            dlog!("event", "  saving config: total={} active={} disabled={}",
+            config.token_bot_info = app.config.token_bot_info.clone();
+            config.token_bot_info.retain(|t, _| config.tokens.contains(t));
+            dlog!(
+                "event",
+                "  saving config: total={} active={} disabled={}",
                 config.tokens.len(),
                 config.active_tokens().len(),
-                config.disabled_tokens.len());
+                config.disabled_tokens.len()
+            );
             if let Err(e) = config.save() {
                 app.set_status(&format!("Failed to save tokens: {}", e), true);
                 return true;
@@ -133,7 +168,7 @@ fn handle_token_input_key(app: &mut App, key: KeyEvent) -> bool {
             app.refresh_status();
             if app.cokacdir_path.is_some() {
                 app.view = View::Dashboard;
-                if app.service_status == service::ServiceStatus::Running {
+                if app.service_status.is_running() {
                     app.set_status("Restart service for changes to take effect", false);
                 }
             } else {
@@ -145,8 +180,7 @@ fn handle_token_input_key(app: &mut App, key: KeyEvent) -> bool {
             app.running = false;
             return false;
         }
-        KeyCode::Up => {
-            match app.token_cursor {
+        KeyCode::Up => match app.token_cursor {
                 None => {
                     if !app.token_list.is_empty() {
                         app.token_cursor = Some(app.token_list.len() - 1);
@@ -156,10 +190,8 @@ fn handle_token_input_key(app: &mut App, key: KeyEvent) -> bool {
                 Some(i) => {
                     app.token_cursor = Some(i - 1);
                 }
-            }
-        }
-        KeyCode::Down => {
-            match app.token_cursor {
+        },
+        KeyCode::Down => match app.token_cursor {
                 Some(i) if i + 1 < app.token_list.len() => {
                     app.token_cursor = Some(i + 1);
                 }
@@ -167,13 +199,17 @@ fn handle_token_input_key(app: &mut App, key: KeyEvent) -> bool {
                     app.token_cursor = None;
                 }
                 None => {}
-            }
-        }
+        },
         KeyCode::Char(' ') if app.token_cursor.is_some() => {
             if let Some(i) = app.token_cursor {
                 if let Some(disabled) = app.token_disabled.get_mut(i) {
                     *disabled = !*disabled;
-                    dlog!("event", "TokenInput: toggled token {} disabled={}", i, *disabled);
+                    dlog!(
+                        "event",
+                        "TokenInput: toggled token {} disabled={}",
+                        i,
+                        *disabled
+                    );
                 }
             }
         }
@@ -189,17 +225,26 @@ fn handle_token_input_key(app: &mut App, key: KeyEvent) -> bool {
                 }
             }
         }
-        KeyCode::Enter => {
-            if app.token_cursor.is_none() {
-                let token = app.token_input.trim().to_string();
-                if !token.is_empty() {
-                    dlog!("event", "TokenInput: adding token (len {})", token.len());
-                    if !app.token_list.contains(&token) {
-                        app.token_list.push(token);
-                        app.token_disabled.push(false);
-                    }
-                    app.token_input.clear();
+        KeyCode::Enter if app.token_cursor.is_none() => {
+            let (token, name_override, has_name_separator) = parse_token_entry(&app.token_input);
+            if !token.is_empty() {
+                dlog!("event", "TokenInput: adding token (len {})", token.len());
+                if !app.token_list.contains(&token) {
+                    app.token_list.push(token.clone());
+                    app.token_disabled.push(false);
                 }
+                if has_name_separator {
+                    match name_override {
+                        Some(name) => {
+                            app.config.token_names.insert(token.clone(), name);
+                        }
+                        None => {
+                            app.config.token_names.remove(&token);
+                        }
+                    }
+                }
+                app.token_input.clear();
+                app.fetch_missing_token_info();
             }
         }
         KeyCode::Backspace if app.token_cursor.is_none() => {
@@ -211,6 +256,22 @@ fn handle_token_input_key(app: &mut App, key: KeyEvent) -> bool {
         _ => {}
     }
     true
+}
+
+fn parse_token_entry(input: &str) -> (String, Option<String>, bool) {
+    let trimmed = input.trim();
+    if let Some((token, name)) = trimmed.split_once('|') {
+        let token = token.trim().to_string();
+        let name = name.trim();
+        let name = if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        };
+        (token, name, true)
+    } else {
+        (trimmed.to_string(), None, false)
+    }
 }
 
 fn handle_dashboard_key(app: &mut App, key: KeyEvent) -> bool {
@@ -295,7 +356,11 @@ fn handle_binary_path_input_key(app: &mut App, key: KeyEvent) -> bool {
                 app.set_status(&format!("Failed to save: {}", e), true);
                 return true;
             }
-            dlog!("event", "BinaryPathInput: saved install_path = {:?}", config.install_path);
+            dlog!(
+                "event",
+                "BinaryPathInput: saved install_path = {:?}",
+                config.install_path
+            );
             app.binary_path_input.clear();
             app.refresh_cokacdir_info();
             if app.cokacdir_path.is_some() {
@@ -369,7 +434,10 @@ fn action_start(app: &mut App) {
     let config = Config::load();
     let tokens = config.active_tokens();
     if tokens.is_empty() {
-        dlog!("event::action_start", "No active tokens, entering token input");
+        dlog!(
+            "event::action_start",
+            "No active tokens, entering token input"
+        );
         app.enter_token_input();
         return;
     }
@@ -402,9 +470,16 @@ fn action_start(app: &mut App) {
         let any = mgr.is_any_running();
         dlog!("event::action_start", "Thread: is_any_running = {}", any);
         if any {
-            dlog!("event::action_start", "Thread: cokacdir process found, stopping all first...");
+            dlog!(
+                "event::action_start",
+                "Thread: cokacdir process found, stopping all first..."
+            );
             let stop_result = mgr.stop();
-            dlog!("event::action_start", "Thread: stop result = {:?}", stop_result);
+            dlog!(
+                "event::action_start",
+                "Thread: stop result = {:?}",
+                stop_result
+            );
         }
         dlog!(
             "event::action_start",
@@ -425,8 +500,6 @@ fn action_start(app: &mut App) {
     });
     app.service_action_rx = Some(rx);
 }
-
-
 
 fn action_stop(app: &mut App) {
     if app.service_busy {
@@ -484,6 +557,15 @@ fn action_restart(app: &mut App) {
 fn action_remove(app: &mut App) {
     if app.service_busy {
         dlog!("event::action_remove", "SKIPPED - service_busy");
+        return;
+    }
+    if app.service_status.service_registration_unavailable() {
+        dlog!(
+            "event::action_remove",
+            "SKIPPED - service registration unavailable: {:?}",
+            app.service_status
+        );
+        app.set_status("Service registration is unavailable in direct mode", true);
         return;
     }
     app.service_busy = true;

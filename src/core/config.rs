@@ -1,7 +1,27 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 const CONFIG_FILENAME: &str = "cokacctl.json";
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TokenBotInfo {
+    /// Telegram bot/user id returned by Bot API getMe.
+    #[serde(default)]
+    pub id: Option<i64>,
+    /// Bot display name returned by Telegram.
+    #[serde(default)]
+    pub first_name: Option<String>,
+    /// Bot username without the leading '@'.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// Optional short description returned by Telegram.
+    #[serde(default)]
+    pub short_description: Option<String>,
+    /// Optional full description returned by Telegram.
+    #[serde(default)]
+    pub description: Option<String>,
+}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -17,7 +37,12 @@ pub struct Config {
     /// Optional user-supplied display names keyed by token. Only read by the
     /// web dashboard; the TUI and CLI don't require this.
     #[serde(default)]
-    pub token_names: std::collections::BTreeMap<String, String>,
+    pub token_names: BTreeMap<String, String>,
+    /// Telegram metadata cached per token after the web dashboard verifies a
+    /// token with the Bot API. The raw token remains the map key and is never
+    /// exposed to the browser.
+    #[serde(default)]
+    pub token_bot_info: BTreeMap<String, TokenBotInfo>,
 }
 
 impl Config {

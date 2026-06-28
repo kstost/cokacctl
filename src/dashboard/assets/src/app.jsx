@@ -234,6 +234,16 @@ const App = () => {
         toast(`Add failed: ${e.message}`, 'err');
       }
     },
+    refreshBot: async (id) => {
+      try {
+        await api('POST', '/api/tokens/refresh', { id });
+        toast('Bot info refreshed', 'ok');
+        refreshState();
+        refreshActivity();
+      } catch (e) {
+        toast(`Refresh failed: ${e.message}`, 'err');
+      }
+    },
     toggleBot: async (id) => {
       try {
         const data = await api('POST', '/api/tokens/toggle', { id });
@@ -350,8 +360,9 @@ const App = () => {
                 badge = <span className="badge amber">1</span>;
               }
               if (item.id === 'service') {
-                if (serviceStatus === 'running') badge = <span className="badge" style={{color:'var(--green)',borderColor:'var(--green-border)',background:'var(--green-soft)'}}>●</span>;
-                else if (serviceStatus === 'stopped') badge = <span className="badge red">●</span>;
+                if (serviceStatus === 'running' || serviceStatus === 'running-direct') badge = <span className="badge" style={{color:'var(--green)',borderColor:'var(--green-border)',background:'var(--green-soft)'}}>●</span>;
+                else if (serviceStatus === 'stopped' || serviceStatus === 'stopped-direct') badge = <span className="badge red">●</span>;
+                else if (serviceStatus === 'unavailable' || serviceStatus === 'unknown') badge = <span className="badge amber">●</span>;
               }
               return (
                 <div key={item.id}
@@ -369,9 +380,9 @@ const App = () => {
 
         <div className="sidebar-foot">
           <div className="host">
-            <span className="dot" style={{
-              background: serviceStatus === 'running' ? 'var(--green)' : 'var(--fg-dim)',
-              boxShadow: serviceStatus === 'running' ? '0 0 8px var(--green)' : 'none',
+              <span className="dot" style={{
+              background: serviceStatus === 'running' || serviceStatus === 'running-direct' ? 'var(--green)' : 'var(--fg-dim)',
+              boxShadow: serviceStatus === 'running' || serviceStatus === 'running-direct' ? '0 0 8px var(--green)' : 'none',
             }}/>
             <span>{platform.host}</span>
           </div>

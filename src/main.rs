@@ -11,10 +11,19 @@ use cli::{Cli, Commands};
 fn main() {
     let cli = Cli::parse();
     core::debug::set_debug_enabled(cli.debug);
-    dlog!("main", "=== cokacctl started (v{}) ===", env!("CARGO_PKG_VERSION"));
+    dlog!(
+        "main",
+        "=== cokacctl started (v{}) ===",
+        env!("CARGO_PKG_VERSION")
+    );
 
     if cli.dashboard {
-        dlog!("main", "Dashboard mode on port {} inbound={}", cli.port, cli.inbound);
+        dlog!(
+            "main",
+            "Dashboard mode on port {} inbound={}",
+            cli.port,
+            cli.inbound
+        );
         run_dashboard(cli.port, cli.inbound);
         dlog!("main", "=== cokacctl exiting ===");
         return;
@@ -36,7 +45,10 @@ fn main() {
 fn run_dashboard(port: u16, inbound: bool) {
     dlog!("main", "run_dashboard: building tokio runtime");
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
-    dlog!("main", "run_dashboard: tokio runtime ready, calling dashboard::serve");
+    dlog!(
+        "main",
+        "run_dashboard: tokio runtime ready, calling dashboard::serve"
+    );
     if let Err(e) = rt.block_on(dashboard::serve(port, inbound)) {
         dlog!("main", "run_dashboard: serve returned err: {}", e);
         eprintln!("\x1b[31m  Dashboard error: {}\x1b[0m", e);
@@ -104,7 +116,12 @@ fn run_status() -> Result<(), String> {
     dlog!("main::status", "Detecting platform...");
     let os = core::platform::Os::detect();
     let arch = core::platform::Arch::detect();
-    dlog!("main::status", "Platform: {}/{}", os.as_str(), arch.as_str());
+    dlog!(
+        "main::status",
+        "Platform: {}/{}",
+        os.as_str(),
+        arch.as_str()
+    );
     println!("  Platform:  {}/{}", os.as_str(), arch.as_str());
     println!("  cokacctl:  v{}", env!("CARGO_PKG_VERSION"));
 
@@ -112,8 +129,8 @@ fn run_status() -> Result<(), String> {
     match core::platform::find_cokacdir() {
         Some(path) => {
             dlog!("main::status", "cokacdir found at: {}", path.display());
-            let version = core::version::installed_version(&path)
-                .unwrap_or_else(|| "unknown".to_string());
+            let version =
+                core::version::installed_version(&path).unwrap_or_else(|| "unknown".to_string());
             dlog!("main::status", "cokacdir version: {}", version);
             println!("  cokacdir:  v{} ({})", version, path.display());
         }
@@ -130,6 +147,8 @@ fn run_status() -> Result<(), String> {
     let symbol = match &status {
         service::ServiceStatus::Running => "\x1b[32m●\x1b[0m",
         service::ServiceStatus::Stopped => "\x1b[31m●\x1b[0m",
+        service::ServiceStatus::DirectRunning(_) => "\x1b[32m●\x1b[0m",
+        service::ServiceStatus::DirectStopped(_) => "\x1b[31m○\x1b[0m",
         service::ServiceStatus::NotInstalled => "\x1b[90m○\x1b[0m",
         service::ServiceStatus::Unknown(_) => "\x1b[33m●\x1b[0m",
     };
@@ -137,7 +156,12 @@ fn run_status() -> Result<(), String> {
 
     let config = core::config::Config::load();
     let active = config.active_tokens();
-    dlog!("main::status", "Config loaded, tokens: {}/{}", active.len(), config.tokens.len());
+    dlog!(
+        "main::status",
+        "Config loaded, tokens: {}/{}",
+        active.len(),
+        config.tokens.len()
+    );
     if !config.tokens.is_empty() {
         println!("  Tokens:    {} bot(s)", active.len());
     }
@@ -227,7 +251,12 @@ fn run_tui() {
     dlog!("tui", "Entering main loop");
     loop {
         if app.view != prev_view {
-            dlog!("tui", "View changed: {:?} -> {:?}, clearing terminal", prev_view, app.view);
+            dlog!(
+                "tui",
+                "View changed: {:?} -> {:?}, clearing terminal",
+                prev_view,
+                app.view
+            );
             terminal.clear().ok();
             prev_view = app.view.clone();
         }
@@ -247,6 +276,7 @@ fn run_tui() {
         app.poll_progress();
         app.poll_service_action();
         app.poll_status_update();
+        app.poll_token_info_update();
         app.expire_status();
 
         if app.checking_update {
@@ -258,7 +288,7 @@ fn run_tui() {
         }
 
         tick_count += 1;
-        if tick_count % 10 == 0 {
+        if tick_count.is_multiple_of(10) {
             if let Some(ref log_path) = cached_log_path {
                 let new_lines = tui::log_viewer::read_new_lines(log_path, &mut log_file_size);
                 if !new_lines.is_empty() {
@@ -275,7 +305,7 @@ fn run_tui() {
                 }
             }
         }
-        if tick_count % 25 == 0 {
+        if tick_count.is_multiple_of(25) {
             dlog!(
                 "tui",
                 "Heartbeat tick {} view={:?} service={:?} log_lines={} scroll={}",

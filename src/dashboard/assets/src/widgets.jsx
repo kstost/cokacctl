@@ -63,11 +63,15 @@ const StatusTag = ({ status }) => {
   const map = {
     running:      { tone: 'green',  label: 'Running' },
     stopped:      { tone: 'red',    label: 'Stopped' },
+    'running-direct': { tone: 'green', label: 'Running direct' },
+    'stopped-direct': { tone: 'red', label: 'Stopped direct' },
     starting:     { tone: 'amber',  label: 'Starting…' },
     stopping:     { tone: 'amber',  label: 'Stopping…' },
     restarting:   { tone: 'amber',  label: 'Restarting…' },
     removing:     { tone: 'amber',  label: 'Removing…' },
     'not-installed': { tone: '',    label: 'Not installed' },
+    unavailable:  { tone: 'amber',  label: 'Unavailable' },
+    unknown:      { tone: 'amber',  label: 'Unknown' },
   };
   const s = map[status] || { tone: '', label: status };
   return <span className={`tag ${s.tone}`}><span className="dot"/>{s.label}</span>;

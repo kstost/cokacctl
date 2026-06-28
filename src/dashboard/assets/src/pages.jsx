@@ -5,16 +5,22 @@ const OverviewPage = ({ state, actions }) => {
   const { serviceStatus, cokacdirVersion, latestVersion, bots, startedAt, activity, pendingAction } = state;
 
   const uptimeMs = startedAt ? Date.now() - startedAt.getTime() : 0;
-  const pulseCls = serviceStatus === 'running' ? '' : serviceStatus === 'stopped' || serviceStatus === 'not-installed' ? 'stopped' : 'unknown';
-  const stateCls = serviceStatus === 'running' ? 'green' : serviceStatus === 'stopped' ? 'red' : 'amber';
+  const running = serviceStatus === 'running' || serviceStatus === 'running-direct';
+  const directMode = serviceStatus === 'running-direct' || serviceStatus === 'stopped-direct';
+  const pulseCls = running ? '' : serviceStatus === 'stopped' || serviceStatus === 'stopped-direct' || serviceStatus === 'not-installed' ? 'stopped' : 'unknown';
+  const stateCls = running ? 'green' : serviceStatus === 'stopped' || serviceStatus === 'stopped-direct' ? 'red' : 'amber';
   const stateLabel = {
     running: 'Running',
     stopped: 'Stopped',
+    'running-direct': 'Running direct',
+    'stopped-direct': 'Stopped direct',
     starting: 'Starting…',
     stopping: 'Stopping…',
     restarting: 'Restarting…',
     removing: 'Removing…',
     'not-installed': 'Not installed',
+    unavailable: 'Unavailable',
+    unknown: 'Unknown',
   }[serviceStatus] || serviceStatus;
 
   const activeBots = bots.filter(b => !b.disabled).length;
@@ -46,7 +52,7 @@ const OverviewPage = ({ state, actions }) => {
           <div className="hero-stats">
             <div className="hero-stat">
               <div className="k">Uptime</div>
-              <div className="v">{serviceStatus === 'running' && startedAt ? fmtUptime(uptimeMs) : '—'}</div>
+              <div className="v">{running && startedAt ? fmtUptime(uptimeMs) : '—'}</div>
             </div>
             <div className="hero-stat">
               <div className="k">Active bots</div>
@@ -59,10 +65,10 @@ const OverviewPage = ({ state, actions }) => {
           </div>
         </div>
         <div className="hero-actions">
-          {serviceStatus !== 'running' ? (
+          {!running ? (
             <button className="btn primary" disabled={activeBots === 0 || state.busy} onClick={() => actions.start()}>
               {pendingAction === 'start' ? <Spinner size={14}/> : <Icon name="play" size={14}/>}
-              {pendingAction === 'start' ? 'Starting…' : 'Start service'}
+              {pendingAction === 'start' ? 'Starting…' : directMode ? 'Start process' : 'Start service'}
             </button>
           ) : (
             <>
@@ -141,7 +147,9 @@ const OverviewPage = ({ state, actions }) => {
 const ServicePage = ({ state, actions }) => {
   const { serviceStatus, platform, bots, startedAt, pendingAction } = state;
   const busy = state.busy || ['starting','stopping','restarting','removing'].includes(serviceStatus);
-  const running = serviceStatus === 'running';
+  const running = serviceStatus === 'running' || serviceStatus === 'running-direct';
+  const registrationUnavailable = ['running-direct', 'stopped-direct', 'unavailable'].includes(serviceStatus);
+  const directMode = serviceStatus === 'running-direct' || serviceStatus === 'stopped-direct';
   const activeBots = bots.filter(b => !b.disabled).length;
 
   return (
@@ -150,7 +158,7 @@ const ServicePage = ({ state, actions }) => {
         <div>
           <h1>Service</h1>
           <div className="subtitle">
-            Manage cokacdir as a background service via {platform.label}.
+            {directMode ? 'Run cokacdir directly because service registration is unavailable.' : `Manage cokacdir as a background service via ${platform.label}.`}
           </div>
         </div>
         <StatusTag status={serviceStatus}/>
@@ -162,8 +170,8 @@ const ServicePage = ({ state, actions }) => {
             <Icon name="play" size={16}/>
           </div>
           <div className="body">
-            <div className="title">Start service</div>
-            <div className="desc">Run cokacdir with the {activeBots} active bot token(s) and register it to start automatically at boot.</div>
+            <div className="title">{directMode ? 'Start process' : 'Start service'}</div>
+            <div className="desc">{directMode ? `Run cokacdir directly with the ${activeBots} active bot token(s). It will not be registered to start automatically.` : `Run cokacdir with the ${activeBots} active bot token(s) and register it to start automatically at boot.`}</div>
           </div>
           <button className="btn primary" disabled={busy || running || activeBots === 0} onClick={() => actions.start()}>
             {pendingAction === 'start' ? <Spinner size={14}/> : <Icon name="play" size={14}/>}
@@ -186,7 +194,7 @@ const ServicePage = ({ state, actions }) => {
         </div>
 
         <div className="svc-row">
-          <div className={`ico-wrap ${!running && serviceStatus === 'stopped' ? 'red' : ''}`}>
+          <div className={`ico-wrap ${!running && (serviceStatus === 'stopped' || serviceStatus === 'stopped-direct') ? 'red' : ''}`}>
             <Icon name="stop" size={16}/>
           </div>
           <div className="body">
@@ -205,9 +213,9 @@ const ServicePage = ({ state, actions }) => {
           </div>
           <div className="body">
             <div className="title">Remove service</div>
-            <div className="desc">Fully unregister cokacdir from {platform.label}. It will be re-registered on the next start.</div>
+            <div className="desc">{registrationUnavailable ? 'Service registration is unavailable in direct mode.' : `Fully unregister cokacdir from ${platform.label}. It will be re-registered on the next start.`}</div>
           </div>
-          <button className="btn danger" disabled={busy || serviceStatus === 'not-installed'} onClick={() => actions.remove()}>
+          <button className="btn danger" disabled={busy || serviceStatus === 'not-installed' || registrationUnavailable} onClick={() => actions.remove()}>
             {pendingAction === 'remove' ? <Spinner size={14}/> : <Icon name="trash" size={14}/>}
             {pendingAction === 'remove' ? 'Removing…' : 'Remove'}
           </button>
@@ -253,6 +261,19 @@ const ServicePage = ({ state, actions }) => {
 };
 
 // ─── Bots ─────────────────────────────────────────────────
+const BotTelegramInfo = ({ bot }) => {
+  const info = [
+    bot.handle,
+    bot.telegramName && bot.telegramName !== bot.name ? bot.telegramName : null,
+    bot.shortDescription || bot.description || null,
+  ].filter(Boolean).join(' · ');
+  return (
+    <div className="bot-handle" style={{ marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+      {bot.verified ? info : `${bot.handle} · Telegram info not fetched yet`}
+    </div>
+  );
+};
+
 const BotsPage = ({ state, actions }) => {
   const { bots } = state;
   return (
@@ -278,7 +299,7 @@ const BotsPage = ({ state, actions }) => {
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div className="bot-name">{b.name}</div>
-                <div className="bot-handle">{b.handle}</div>
+                <BotTelegramInfo bot={b}/>
               </div>
               {b.disabled ? <StatusTag status="stopped"/> : <StatusTag status="running"/>}
             </div>
@@ -289,6 +310,7 @@ const BotsPage = ({ state, actions }) => {
                 <button className="btn ghost sm" onClick={() => actions.toggleBot(b.id)}>
                   {b.disabled ? 'Enable' : 'Disable'}
                 </button>
+                <button className="btn ghost sm" onClick={() => actions.refreshBot(b.id)}>Refresh</button>
                 <button className="btn ghost sm" onClick={() => actions.goto('tokens')}>Manage</button>
               </div>
             </div>
@@ -347,9 +369,9 @@ const TokensPage = ({ state, actions, toast }) => {
         </div>
         <div className="token-form">
           <div className="field" style={{ marginBottom: 0 }}>
-            <div className="lbl">Display name (optional)</div>
+            <div className="lbl">Display name override (optional)</div>
             <input className="input" style={{ fontFamily: 'var(--sans)' }}
-                   placeholder="e.g. Walk reminder bot"
+                   placeholder="Blank = use Telegram bot name"
                    value={name} onChange={(e) => setName(e.target.value)}/>
           </div>
           <div className="field" style={{ marginBottom: 0 }}>
@@ -374,7 +396,7 @@ const TokensPage = ({ state, actions, toast }) => {
               <th>Name / handle</th>
               <th>Token</th>
               <th>Status</th>
-              <th style={{ textAlign: 'right', width: 160 }}></th>
+              <th style={{ textAlign: 'right', width: 230 }}></th>
             </tr>
           </thead>
           <tbody>
@@ -386,8 +408,16 @@ const TokensPage = ({ state, actions, toast }) => {
                   </div>
                 </td>
                 <td>
-                  <div style={{ fontWeight: 500 }}>{b.name}</div>
-                  <div style={{ color: 'var(--fg-dim)', fontSize: 12, fontFamily: 'var(--mono)' }}>{b.handle}</div>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, minWidth: 0, whiteSpace: 'nowrap' }}>
+                    <span style={{ fontWeight: 500 }}>{b.name}</span>
+                    <span style={{ color: 'var(--fg-dim)', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {[
+                        b.handle,
+                        b.verified && b.telegramName && b.telegramName !== b.name ? b.telegramName : null,
+                        b.verified ? (b.shortDescription || b.description || null) : 'Not fetched yet',
+                      ].filter(Boolean).join(' · ')}
+                    </span>
+                  </div>
                 </td>
                 <td className="mono">
                   <div style={{ display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
@@ -399,6 +429,9 @@ const TokensPage = ({ state, actions, toast }) => {
                   <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
                     <button className="btn ghost sm" onClick={() => actions.toggleBot(b.id)}>
                       {b.disabled ? 'Enable' : 'Disable'}
+                    </button>
+                    <button className="btn ghost sm" onClick={() => actions.refreshBot(b.id)}>
+                      Refresh
                     </button>
                     <button className="btn ghost sm" onClick={() => actions.removeBot(b.id)}>
                       <Icon name="trash" size={12}/>

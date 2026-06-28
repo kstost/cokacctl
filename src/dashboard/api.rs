@@ -11,8 +11,9 @@ use std::hash::{Hash, Hasher};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::core::config::Config;
+use crate::core::config::{Config, TokenBotInfo};
 use crate::core::platform::{self, Os};
+use crate::core::telegram;
 use crate::core::version;
 use crate::core::{ProgressMsg, ProgressTx};
 use crate::service::{self, ServiceStatus};
@@ -25,8 +26,14 @@ const MAX_NAME_LEN: usize = 128;
 const MAX_PATH_LEN: usize = 1024;
 
 pub async fn handle(req: &Request, state: &SharedState) -> Response {
-    dlog!("api", "dispatch {} {} body={}B peer={}",
-          req.method, req.path, req.body.len(), req.peer);
+    dlog!(
+        "api",
+        "dispatch {} {} body={}B peer={}",
+        req.method,
+        req.path,
+        req.body.len(),
+        req.peer
+    );
     let resp = match (req.method.as_str(), req.path.as_str()) {
         ("GET",  "/api/state")            => get_state(state).await,
         ("GET",  "/api/logs")             => get_logs().await,
@@ -39,6 +46,7 @@ pub async fn handle(req: &Request, state: &SharedState) -> Response {
         ("POST", "/api/update/check")     => post_check_update(state).await,
         ("POST", "/api/update/apply")     => post_apply_update(state).await,
         ("POST", "/api/tokens/add")       => post_token_add(state, &req.body).await,
+        ("POST", "/api/tokens/refresh")   => post_token_refresh(state, &req.body).await,
         ("POST", "/api/tokens/toggle")    => post_token_toggle(state, &req.body).await,
         ("POST", "/api/tokens/delete")    => post_token_delete(state, &req.body).await,
         ("POST", "/api/binary-path")      => post_binary_path(state, &req.body).await,
@@ -47,8 +55,14 @@ pub async fn handle(req: &Request, state: &SharedState) -> Response {
             Response::not_found()
         }
     };
-    dlog!("api", "response {} {} -> {} ({}B)",
-          req.method, req.path, resp.status, resp.body.len());
+    dlog!(
+        "api",
+        "response {} {} -> {} ({}B)",
+        req.method,
+        req.path,
+        resp.status,
+        resp.body.len()
+    );
     resp
 }
 
@@ -73,26 +87,32 @@ async fn get_state(state: &SharedState) -> Response {
 fn build_state_json(state: &SharedState) -> Value {
     let os = Os::detect();
     let config = Config::load();
-    dlog!("api::state", "os={:?} tokens={} disabled={}",
-          os, config.tokens.len(), config.disabled_tokens.len());
+    dlog!(
+        "api::state",
+        "os={:?} tokens={} disabled={}",
+        os,
+        config.tokens.len(),
+        config.disabled_tokens.len()
+    );
 
     let mgr = service::manager();
     let svc_status_raw = mgr.status();
     let svc_status = match svc_status_raw {
         ServiceStatus::Running       => "running",
         ServiceStatus::Stopped       => "stopped",
+        ServiceStatus::DirectRunning(_) => "running-direct",
+        ServiceStatus::DirectStopped(_) => "stopped-direct",
         ServiceStatus::NotInstalled  => "not-installed",
         ServiceStatus::Unknown(_)    => "unknown",
     };
     dlog!("api::state", "service status: {}", svc_status);
 
-    let binary_path = platform::find_cokacdir()
-        .map(|p| p.display().to_string());
+    let binary_path = platform::find_cokacdir().map(|p| p.display().to_string());
     dlog!("api::state", "binary path: {:?}", binary_path);
 
-    let cokacdir_version = binary_path.as_ref().and_then(|p| {
-        version::installed_version(std::path::Path::new(p))
-    });
+    let cokacdir_version = binary_path
+        .as_ref()
+        .and_then(|p| version::installed_version(std::path::Path::new(p)));
     dlog!("api::state", "cokacdir version: {:?}", cokacdir_version);
 
     let svc_paths = platform::ServicePaths::for_current_os();
@@ -100,7 +120,13 @@ fn build_state_json(state: &SharedState) -> Value {
     let error_log_path = svc_paths.error_log_file.display().to_string();
     let config_path = Config::path().display().to_string();
     let debug_log_path = dirs::home_dir()
-        .map(|h| h.join(".cokacdir").join("debug").join("cokacctl.log").display().to_string())
+        .map(|h| {
+            h.join(".cokacdir")
+                .join("debug")
+                .join("cokacctl.log")
+                .display()
+                .to_string()
+        })
         .unwrap_or_default();
 
     let platform_obj = json!({
@@ -110,22 +136,44 @@ fn build_state_json(state: &SharedState) -> Value {
         "os":    os_label(os),
     });
 
-    let bots: Vec<Value> = config.tokens.iter().enumerate().map(|(i, token)| {
-        let disabled = config.disabled_tokens.contains(token);
-        let name = config.token_names
-            .get(token)
-            .cloned()
-            .unwrap_or_else(|| derive_bot_name(token, i));
-        let handle = derive_bot_handle(token);
-        json!({
-            "id":       bot_id(token),
-            "name":     name,
-            "handle":   handle,
-            "preview":  mask_token(token),
-            "disabled": disabled,
-            "addedAt":  Value::Null,
+    let bots: Vec<Value> = config
+        .tokens
+        .iter()
+        .enumerate()
+        .map(|(i, token)| {
+            let disabled = config.disabled_tokens.contains(token);
+            let bot_info = config.token_bot_info.get(token);
+            let telegram_name = bot_info.and_then(|info| info.first_name.clone());
+            let name = config
+                .token_names
+                .get(token)
+                .cloned()
+                .or_else(|| telegram_name.clone())
+                .unwrap_or_else(|| derive_bot_name(token, i));
+            let username = bot_info.and_then(|info| info.username.clone());
+            let handle = username
+                .as_ref()
+                .map(|u| format!("@{}", u))
+                .unwrap_or_else(|| derive_bot_handle(token));
+            let telegram_id = bot_info.and_then(|info| info.id);
+            let short_description = bot_info.and_then(|info| info.short_description.clone());
+            let description = bot_info.and_then(|info| info.description.clone());
+            json!({
+                "id":               bot_id(token),
+                "name":             name,
+                "handle":           handle,
+                "preview":          mask_token(token),
+                "disabled":         disabled,
+                "addedAt":          Value::Null,
+                "verified":         bot_info.is_some(),
+                "telegramId":       telegram_id,
+                "telegramName":     telegram_name,
+                "username":         username,
+                "shortDescription": short_description,
+                "description":      description,
+            })
         })
-    }).collect();
+        .collect();
 
     json!({
         "serviceStatus":    svc_status,
@@ -181,7 +229,9 @@ fn hostname() -> String {
                     buf.truncate(end);
                 }
                 if let Ok(s) = String::from_utf8(buf) {
-                    if !s.is_empty() { return s; }
+                    if !s.is_empty() {
+                        return s;
+                    }
                 }
             }
         }
@@ -201,8 +251,14 @@ fn derive_bot_name(token: &str, idx: usize) -> String {
 
 fn derive_bot_handle(token: &str) -> String {
     let chars: Vec<char> = token.chars().collect();
-    let tail: String = chars.iter().rev().take(6).collect::<Vec<_>>()
-        .into_iter().rev().collect();
+    let tail: String = chars
+        .iter()
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     format!("@bot_{}", tail)
 }
 
@@ -226,7 +282,10 @@ async fn get_logs() -> Response {
         dlog!("api::logs", "loading from {}", path.display());
         let lines = crate::tui::log_viewer::load_log_lines(&path, 200);
         dlog!("api::logs", "loaded {} lines", lines.len());
-        let parsed: Vec<Value> = lines.iter().enumerate().map(|(i, raw)| {
+        let parsed: Vec<Value> = lines
+            .iter()
+            .enumerate()
+            .map(|(i, raw)| {
             json!({
                 "id":     format!("l-{}-{}", i, raw.len()),
                 "time":   super::state::rfc3339_now(),
@@ -234,7 +293,8 @@ async fn get_logs() -> Response {
                 "source": "cokacdir",
                 "msg":    raw,
             })
-        }).collect();
+            })
+            .collect();
         json!({ "lines": parsed })
     })
     .await
@@ -248,11 +308,17 @@ async fn get_logs() -> Response {
 
 fn classify_level(line: &str) -> &'static str {
     let l = line.to_lowercase();
-    if l.contains(" error") || l.contains("[error]") || l.contains("fatal") { "err" }
-    else if l.contains(" warn") || l.contains("[warn]")                      { "warn" }
-    else if l.contains(" debug") || l.contains("[debug]")                    { "debug" }
-    else if l.contains(" ok ") || l.contains("[ok]")                          { "ok" }
-    else                                                                      { "info" }
+    if l.contains(" error") || l.contains("[error]") || l.contains("fatal") {
+        "err"
+    } else if l.contains(" warn") || l.contains("[warn]") {
+        "warn"
+    } else if l.contains(" debug") || l.contains("[debug]") {
+        "debug"
+    } else if l.contains(" ok ") || l.contains("[ok]") {
+        "ok"
+    } else {
+        "info"
+    }
 }
 
 // ─── GET /api/activity ─────────────────────────────────────────────────────
@@ -265,7 +331,13 @@ async fn get_activity(state: &SharedState) -> Response {
 
 // ─── POST /api/service/* ───────────────────────────────────────────────────
 
-enum ServiceAction { Start, Stop, Restart, Remove }
+#[derive(Clone, Copy)]
+enum ServiceAction {
+    Start,
+    Stop,
+    Restart,
+    Remove,
+}
 
 async fn post_service(state: &SharedState, action: ServiceAction) -> Response {
     let action_name = match action {
@@ -278,6 +350,16 @@ async fn post_service(state: &SharedState, action: ServiceAction) -> Response {
     let state = state.clone();
     let result: Result<&'static str, String> = tokio::task::spawn_blocking(move || {
         let mgr = service::manager();
+        if matches!(action, ServiceAction::Remove)
+            && mgr.status().service_registration_unavailable()
+        {
+            dlog!(
+                "api::service",
+                "{}: refused - service registration unavailable",
+                action_name
+            );
+            return Err("Service registration is unavailable in direct mode.".into());
+        }
         match action {
             ServiceAction::Start => {
                 let config = Config::load();
@@ -287,8 +369,7 @@ async fn post_service(state: &SharedState, action: ServiceAction) -> Response {
                     dlog!("api::service", "start: refused — no active tokens");
                     return Err("No active tokens. Add one from the Tokens page first.".into());
                 }
-                let bin = platform::find_cokacdir()
-                    .ok_or_else(|| {
+                let bin = platform::find_cokacdir().ok_or_else(|| {
                         dlog!("api::service", "start: refused — cokacdir not installed");
                         "cokacdir is not installed. Install it first.".to_string()
                     })?;
@@ -298,8 +379,12 @@ async fn post_service(state: &SharedState, action: ServiceAction) -> Response {
                     e
                 })?;
                 state.mark_started();
-                state.push_activity("svc-start", "Service started",
-                    &format!("Running with {} bot token(s)", tokens.len()), "green");
+                state.push_activity(
+                    "svc-start",
+                    "Service started",
+                    &format!("Running with {} bot token(s)", tokens.len()),
+                    "green",
+                );
                 dlog!("api::service", "start: done");
                 Ok("Service started")
             }
@@ -321,8 +406,7 @@ async fn post_service(state: &SharedState, action: ServiceAction) -> Response {
                     dlog!("api::service", "restart: refused — no active tokens");
                     return Err("No active tokens.".into());
                 }
-                let bin = platform::find_cokacdir()
-                    .ok_or_else(|| {
+                let bin = platform::find_cokacdir().ok_or_else(|| {
                         dlog!("api::service", "restart: refused — cokacdir not installed");
                         "cokacdir is not installed.".to_string()
                     })?;
@@ -332,8 +416,12 @@ async fn post_service(state: &SharedState, action: ServiceAction) -> Response {
                     e
                 })?;
                 state.mark_started();
-                state.push_activity("svc-restart", "Service restarted",
-                    &format!("{} bot token(s)", tokens.len()), "green");
+                state.push_activity(
+                    "svc-restart",
+                    "Service restarted",
+                    &format!("{} bot token(s)", tokens.len()),
+                    "green",
+                );
                 dlog!("api::service", "restart: done");
                 Ok("Restarted")
             }
@@ -343,7 +431,12 @@ async fn post_service(state: &SharedState, action: ServiceAction) -> Response {
                     e
                 })?;
                 state.mark_stopped();
-                state.push_activity("svc-stop", "Service unregistered", "Removed from service manager", "red");
+                state.push_activity(
+                    "svc-stop",
+                    "Service unregistered",
+                    "Removed from service manager",
+                    "red",
+                );
                 dlog!("api::service", "remove: done");
                 Ok("Service registration removed")
             }
@@ -383,7 +476,8 @@ async fn post_install(state: &SharedState) -> Response {
         Err(_) => {
             dlog!("api::install", "lock contended -> 409");
             return Response::err_json(
-                409, "Conflict",
+                409,
+                "Conflict",
                 "An install or update is already in progress. Please wait for it to finish.".into(),
             );
         }
@@ -431,14 +525,14 @@ async fn post_apply_update(state: &SharedState) -> Response {
         Err(_) => {
             dlog!("api::update_apply", "lock contended -> 409");
             return Response::err_json(
-                409, "Conflict",
+                409,
+                "Conflict",
                 "An install or update is already in progress. Please wait for it to finish.".into(),
             );
         }
     };
     let old = tokio::task::spawn_blocking(|| {
-        platform::find_cokacdir()
-            .and_then(|p| version::installed_version(&p))
+        platform::find_cokacdir().and_then(|p| version::installed_version(&p))
     })
     .await
     .ok()
@@ -451,8 +545,7 @@ async fn post_apply_update(state: &SharedState) -> Response {
         Ok(_) => {
             dlog!("api::update_apply", "update::run_bg succeeded");
             let new = tokio::task::spawn_blocking(|| {
-                platform::find_cokacdir()
-                    .and_then(|p| version::installed_version(&p))
+                platform::find_cokacdir().and_then(|p| version::installed_version(&p))
             })
             .await
             .ok()
@@ -476,10 +569,16 @@ async fn post_apply_update(state: &SharedState) -> Response {
 // ─── POST /api/tokens/* ───────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-struct AddBot { token: String, #[serde(default)] name: Option<String> }
+struct AddBot {
+    token: String,
+    #[serde(default)]
+    name: Option<String>,
+}
 
 #[derive(Deserialize)]
-struct BotIdRef { id: String }
+struct BotIdRef {
+    id: String,
+}
 
 async fn post_token_add(state: &SharedState, body: &[u8]) -> Response {
     dlog!("api::token_add", "body={}B", body.len());
@@ -505,7 +604,43 @@ async fn post_token_add(state: &SharedState, body: &[u8]) -> Response {
         },
         None => None,
     };
-    dlog!("api::token_add", "token={} name={:?}", mask_token(&token), name_opt);
+    dlog!(
+        "api::token_add",
+        "token={} name={:?}",
+        mask_token(&token),
+        name_opt
+    );
+    let token_for_dup = token.clone();
+    let duplicate_check: Result<(), String> = tokio::task::spawn_blocking({
+        let state_c = state.clone();
+        move || {
+            let _cg = state_c.config_lock.lock().unwrap();
+            let config = Config::load();
+            if config.tokens.iter().any(|t| t == &token_for_dup) {
+                dlog!("api::token_add", "duplicate token");
+                return Err("Token already registered".into());
+            }
+            Ok(())
+        }
+    })
+    .await
+    .unwrap_or_else(|e| {
+        dlog!("api::token_add", "duplicate check join failed: {}", e);
+        Err(format!("join: {}", e))
+    });
+    if let Err(e) = duplicate_check {
+        return Response::err_json(400, "Bad Request", e);
+    }
+
+    let bot_info = match telegram::fetch_bot_info(&token).await {
+        Ok(info) => info,
+        Err(e) => {
+            dlog!("api::token_add", "telegram verification failed: {}", e);
+            return Response::err_json(400, "Bad Request", e);
+        }
+    };
+    let display_name_override = name_opt;
+    let activity_meta = bot_activity_meta(&bot_info, &token);
     let state_c = state.clone();
     let result: Result<(), String> = tokio::task::spawn_blocking(move || {
         let _cg = state_c.config_lock.lock().unwrap();
@@ -515,22 +650,97 @@ async fn post_token_add(state: &SharedState, body: &[u8]) -> Response {
             return Err("Token already registered".into());
         }
         config.tokens.push(token.clone());
-        if let Some(n) = name_opt {
+        if let Some(n) = display_name_override {
             config.token_names.insert(token.clone(), n);
         }
+        config.token_bot_info.insert(token.clone(), bot_info);
         config.save().map_err(|e| {
             dlog!("api::token_add", "config.save failed: {}", e);
             e
         })?;
-        state_c.push_activity("bot-add", "Bot added", &mask_token(&token), "blue");
-        dlog!("api::token_add", "saved (total tokens now {})", config.tokens.len());
+        state_c.push_activity("bot-add", "Bot added", &activity_meta, "blue");
+        dlog!(
+            "api::token_add",
+            "saved (total tokens now {})",
+            config.tokens.len()
+        );
         Ok(())
-    }).await.unwrap_or_else(|e| {
+    })
+    .await
+    .unwrap_or_else(|e| {
         dlog!("api::token_add", "spawn_blocking join failed: {}", e);
         Err(format!("join: {}", e))
     });
     match result {
         Ok(_)  => Response::ok_json(json!({ "message": "Bot added" }).to_string()),
+        Err(e) => Response::err_json(400, "Bad Request", e),
+    }
+}
+
+async fn post_token_refresh(state: &SharedState, body: &[u8]) -> Response {
+    dlog!("api::token_refresh", "body={}B", body.len());
+    let req: BotIdRef = match parse_json(body) {
+        Ok(r) => r,
+        Err(e) => {
+            dlog!("api::token_refresh", "parse failed: {}", e);
+            return Response::err_json(400, "Bad Request", e);
+        }
+    };
+    let id = req.id;
+    dlog!("api::token_refresh", "id={}", id);
+
+    let token_result: Result<String, String> = tokio::task::spawn_blocking({
+        let state_c = state.clone();
+        let id = id.clone();
+        move || {
+            let _cg = state_c.config_lock.lock().unwrap();
+            let config = Config::load();
+            resolve_id(&config.tokens, &id).ok_or_else(|| "Unknown bot".into())
+        }
+    })
+    .await
+    .unwrap_or_else(|e| {
+        dlog!("api::token_refresh", "token lookup join failed: {}", e);
+        Err(format!("join: {}", e))
+    });
+    let token = match token_result {
+        Ok(t) => t,
+        Err(e) => return Response::err_json(400, "Bad Request", e),
+    };
+
+    let bot_info = match telegram::fetch_bot_info(&token).await {
+        Ok(info) => info,
+        Err(e) => {
+            dlog!("api::token_refresh", "telegram refresh failed: {}", e);
+            return Response::err_json(400, "Bad Request", e);
+        }
+    };
+    let activity_meta = bot_activity_meta(&bot_info, &token);
+    let result: Result<(), String> = tokio::task::spawn_blocking({
+        let state_c = state.clone();
+        move || {
+            let _cg = state_c.config_lock.lock().unwrap();
+            let mut config = Config::load();
+            if !config.tokens.iter().any(|t| t == &token) {
+                return Err("Unknown bot".into());
+            }
+            config.token_bot_info.insert(token.clone(), bot_info);
+            config.save().map_err(|e| {
+                dlog!("api::token_refresh", "config.save failed: {}", e);
+                e
+            })?;
+            state_c.push_activity("bot-add", "Bot info refreshed", &activity_meta, "blue");
+            Ok(())
+        }
+    })
+    .await
+    .unwrap_or_else(|e| {
+        dlog!("api::token_refresh", "save join failed: {}", e);
+        Err(format!("join: {}", e))
+    });
+
+    match result {
+        Ok(_)  => Response::ok_json(json!({ "message": "Bot info refreshed" }).to_string()),
         Err(e) => Response::err_json(400, "Bad Request", e),
     }
 }
@@ -568,16 +778,31 @@ async fn post_token_toggle(state: &SharedState, body: &[u8]) -> Response {
             e
         })?;
         let now_disabled = !was_disabled;
-        dlog!("api::token_toggle", "token={} was_disabled={} now_disabled={}",
-              mask_token(&token), was_disabled, now_disabled);
+        dlog!(
+            "api::token_toggle",
+            "token={} was_disabled={} now_disabled={}",
+            mask_token(&token),
+            was_disabled,
+            now_disabled
+        );
         state_c.push_activity(
-            if now_disabled { "bot-disable" } else { "bot-add" },
-            if now_disabled { "Bot disabled" } else { "Bot enabled" },
+            if now_disabled {
+                "bot-disable"
+            } else {
+                "bot-add"
+            },
+            if now_disabled {
+                "Bot disabled"
+            } else {
+                "Bot enabled"
+            },
             &mask_token(&token),
             if now_disabled { "" } else { "blue" },
         );
         Ok(now_disabled)
-    }).await.unwrap_or_else(|e| {
+    })
+    .await
+    .unwrap_or_else(|e| {
         dlog!("api::token_toggle", "spawn_blocking join failed: {}", e);
         Err(format!("join: {}", e))
     });
@@ -612,15 +837,22 @@ async fn post_token_delete(state: &SharedState, body: &[u8]) -> Response {
         config.tokens.retain(|t| t != &token);
         config.disabled_tokens.retain(|t| t != &token);
         config.token_names.remove(&token);
+        config.token_bot_info.remove(&token);
         config.save().map_err(|e| {
             dlog!("api::token_delete", "config.save failed: {}", e);
             e
         })?;
-        dlog!("api::token_delete", "removed token={} (remaining {})",
-              mask_token(&token), config.tokens.len());
+        dlog!(
+            "api::token_delete",
+            "removed token={} (remaining {})",
+            mask_token(&token),
+            config.tokens.len()
+        );
         state_c.push_activity("bot-remove", "Bot removed", &mask_token(&token), "red");
         Ok(())
-    }).await.unwrap_or_else(|e| {
+    })
+    .await
+    .unwrap_or_else(|e| {
         dlog!("api::token_delete", "spawn_blocking join failed: {}", e);
         Err(format!("join: {}", e))
     });
@@ -633,7 +865,9 @@ async fn post_token_delete(state: &SharedState, body: &[u8]) -> Response {
 // ─── POST /api/binary-path ────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-struct BinaryPath { path: String }
+struct BinaryPath {
+    path: String,
+}
 
 async fn post_binary_path(state: &SharedState, body: &[u8]) -> Response {
     dlog!("api::binary_path", "body={}B", body.len());
@@ -677,7 +911,9 @@ async fn post_binary_path(state: &SharedState, body: &[u8]) -> Response {
         })?;
         state_c.push_activity("install", "Binary path changed", &meta, "blue");
         Ok(())
-    }).await.unwrap_or_else(|e| {
+    })
+    .await
+    .unwrap_or_else(|e| {
         dlog!("api::binary_path", "spawn_blocking join failed: {}", e);
         Err(format!("join: {}", e))
     });
@@ -691,6 +927,18 @@ async fn post_binary_path(state: &SharedState, body: &[u8]) -> Response {
 
 fn parse_json<T: for<'de> Deserialize<'de>>(body: &[u8]) -> Result<T, String> {
     serde_json::from_slice(body).map_err(|e| format!("Invalid JSON: {}", e))
+}
+
+fn bot_activity_meta(info: &TokenBotInfo, fallback_token: &str) -> String {
+    let name = info
+        .first_name
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("Telegram bot");
+    match info.username.as_deref().filter(|s| !s.trim().is_empty()) {
+        Some(username) => format!("{} (@{})", name, username),
+        None => format!("{} ({})", name, mask_token(fallback_token)),
+    }
 }
 
 /// Build a ProgressTx whose receiver is held but unread. The install/update
@@ -738,6 +986,19 @@ fn validate_token(token: &str) -> Result<(), String> {
     if token.chars().any(|c| c.is_control()) {
         return Err("Token contains control characters".into());
     }
+    let Some((bot_id, secret)) = token.split_once(':') else {
+        return Err("Token format should be <bot-id>:<secret>".into());
+    };
+    if bot_id.is_empty() || !bot_id.chars().all(|c| c.is_ascii_digit()) {
+        return Err("Token bot id should contain only digits".into());
+    }
+    if secret.len() < 20
+        || !secret
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err("Token secret has an invalid format".into());
+    }
     Ok(())
 }
 
@@ -761,7 +1022,10 @@ fn validate_path_syntax(path: &str) -> Result<(), String> {
     if path.len() > MAX_PATH_LEN {
         return Err(format!("Path is too long (max {} chars)", MAX_PATH_LEN));
     }
-    if path.chars().any(|c| c == '\0' || (c.is_control() && c != '\t')) {
+    if path
+        .chars()
+        .any(|c| c == '\0' || (c.is_control() && c != '\t'))
+    {
         return Err("Path contains control characters".into());
     }
     if path.is_empty() {
@@ -785,7 +1049,9 @@ fn validate_path_exists(path: &str) -> Result<(), String> {
         return Ok(());
     }
     if !std::path::Path::new(path).is_file() {
-        return Err("No file at that path. Install cokacdir first or provide a correct path.".into());
+        return Err(
+            "No file at that path. Install cokacdir first or provide a correct path.".into(),
+        );
     }
     Ok(())
 }

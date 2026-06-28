@@ -20,13 +20,19 @@ fn try_restart_existing(tx: &Option<ProgressTx>) {
     }
     if let Some(existing) = platform::find_cokacdir() {
         dlog!("update", "Rollback: restarting with {}", existing.display());
-        send(tx, "  Update failed — restarting service with existing binary...".into());
+        send(
+            tx,
+            "  Update failed — restarting service with existing binary...".into(),
+        );
         match crate::service::manager().start(&existing, &tokens) {
             Ok(_)  => dlog!("update", "Rollback restart ok"),
             Err(e) => dlog!("update", "Rollback restart failed: {}", e),
         }
     } else {
-        dlog!("update", "Rollback: no existing binary found, cannot restart");
+        dlog!(
+            "update",
+            "Rollback: no existing binary found, cannot restart"
+        );
     }
 }
 
@@ -53,14 +59,12 @@ async fn run_inner(tx: &Option<ProgressTx>) -> Result<(), String> {
     let arch = platform::Arch::detect();
 
     dlog!("update", "Finding installed binary...");
-    let binary_path = platform::find_cokacdir().ok_or(
-        "cokacdir not found. Run 'cokacctl install' first.".to_string(),
-    )?;
+    let binary_path = platform::find_cokacdir()
+        .ok_or("cokacdir not found. Run 'cokacctl install' first.".to_string())?;
     dlog!("update", "Found: {}", binary_path.display());
 
-    let current = version::installed_version(&binary_path).ok_or(
-        "Cannot determine installed cokacdir version.".to_string(),
-    )?;
+    let current = version::installed_version(&binary_path)
+        .ok_or("Cannot determine installed cokacdir version.".to_string())?;
     dlog!("update", "Current version: {}", current);
     send(tx, format!("  Current version: v{}", current));
 
@@ -82,7 +86,8 @@ async fn run_inner(tx: &Option<ProgressTx>) -> Result<(), String> {
     send(tx, format!("  Updating v{} → v{}...", current, latest));
 
     let mgr = crate::service::manager();
-    let was_running = mgr.status() == crate::service::ServiceStatus::Running || mgr.is_any_running();
+    let status = mgr.status();
+    let was_running = status.is_running() || mgr.is_any_running();
     dlog!("update", "Service was_running: {}", was_running);
     if was_running {
         send(tx, "  Stopping service for update...".into());
@@ -139,7 +144,12 @@ fn is_writable_dir(path: &std::path::Path) -> bool {
             true
         }
         Err(e) => {
-            dlog!("update", "is_writable_dir: {} -> false ({})", path.display(), e);
+            dlog!(
+                "update",
+                "is_writable_dir: {} -> false ({})",
+                path.display(),
+                e
+            );
             false
         }
     }
@@ -225,10 +235,7 @@ async fn update_with_sudo(
         }
         Err(e) => {
             dlog!("update", "chmod +x failed to invoke: {}", e);
-            send(
-                tx,
-                format!("  Warning: could not run sudo chmod +x: {}", e),
-            );
+            send(tx, format!("  Warning: could not run sudo chmod +x: {}", e));
         }
     }
 

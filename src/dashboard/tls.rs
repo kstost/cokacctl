@@ -41,8 +41,11 @@ pub fn load_or_create() -> Result<TlsMaterial, String> {
     // we compiled in. install_default returns Err if already installed —
     // ignore that since we only care that it's present.
     let install_res = rustls::crypto::ring::default_provider().install_default();
-    dlog!("dashboard::tls", "ring crypto provider install_default ok={}",
-          install_res.is_ok());
+    dlog!(
+        "dashboard::tls",
+        "ring crypto provider install_default ok={}",
+        install_res.is_ok()
+    );
 
     let dir = dirs::home_dir()
         .ok_or_else(|| {
@@ -52,8 +55,7 @@ pub fn load_or_create() -> Result<TlsMaterial, String> {
         .join(".cokacdir")
         .join("dashboard");
     dlog!("dashboard::tls", "cert dir: {}", dir.display());
-    fs::create_dir_all(&dir)
-        .map_err(|e| {
+    fs::create_dir_all(&dir).map_err(|e| {
             dlog!("dashboard::tls", "create_dir_all failed: {}", e);
             format!("Cannot create cert directory {}: {}", dir.display(), e)
         })?;
@@ -66,7 +68,11 @@ pub fn load_or_create() -> Result<TlsMaterial, String> {
 
     let (cert_pem, key_pem, regenerated) = match try_load(&cert_path, &key_path, &san) {
         Some(pair) => {
-            dlog!("dashboard::tls", "Reusing cached cert at {}", cert_path.display());
+            dlog!(
+                "dashboard::tls",
+                "Reusing cached cert at {}",
+                cert_path.display()
+            );
             (pair.0, pair.1, false)
         }
         None => {
@@ -78,7 +84,11 @@ pub fn load_or_create() -> Result<TlsMaterial, String> {
     };
 
     let cert_chain = parse_cert_chain(&cert_pem)?;
-    dlog!("dashboard::tls", "parsed cert chain ({} certs)", cert_chain.len());
+    dlog!(
+        "dashboard::tls",
+        "parsed cert chain ({} certs)",
+        cert_chain.len()
+    );
     let priv_key = parse_priv_key(&key_pem)?;
     dlog!("dashboard::tls", "parsed private key");
 
@@ -92,7 +102,11 @@ pub fn load_or_create() -> Result<TlsMaterial, String> {
         .with_no_client_auth()
         .with_single_cert(cert_chain, priv_key)
         .map_err(|e| {
-            dlog!("dashboard::tls", "ServerConfig with_single_cert failed: {}", e);
+            dlog!(
+                "dashboard::tls",
+                "ServerConfig with_single_cert failed: {}",
+                e
+            );
             format!("rustls ServerConfig: {}", e)
         })?;
     // Browser fetches use HTTP/1.1 — advertising it explicitly avoids ALPN
@@ -143,7 +157,10 @@ fn try_load(
                 .unwrap_or(0);
             let renew_threshold = now + RENEW_BEFORE_DAYS * 86_400;
             if not_after_unix <= renew_threshold {
-                dlog!("dashboard::tls", "Cached cert in renewal window, regenerating");
+                dlog!(
+                    "dashboard::tls",
+                    "Cached cert in renewal window, regenerating"
+                );
                 return None;
             }
             for want in expected_san {
@@ -175,8 +192,7 @@ fn try_load(
 
 fn generate_cert(san: &[String]) -> Result<(String, String), String> {
     dlog!("dashboard::tls", "generate_cert: san_count={}", san.len());
-    let mut params = CertificateParams::new(san.to_vec())
-        .map_err(|e| {
+    let mut params = CertificateParams::new(san.to_vec()).map_err(|e| {
             dlog!("dashboard::tls", "CertificateParams::new failed: {}", e);
             format!("CertificateParams::new: {}", e)
         })?;
@@ -195,9 +211,7 @@ fn generate_cert(san: &[String]) -> Result<(String, String), String> {
         dlog!("dashboard::tls", "KeyPair::generate failed: {}", e);
         format!("KeyPair::generate: {}", e)
     })?;
-    let cert = params
-        .self_signed(&key_pair)
-        .map_err(|e| {
+    let cert = params.self_signed(&key_pair).map_err(|e| {
             dlog!("dashboard::tls", "self_signed failed: {}", e);
             format!("self_signed: {}", e)
         })?;
@@ -212,16 +226,23 @@ fn persist(
     cert_pem: &str,
     key_pem: &str,
 ) -> Result<(), String> {
-    dlog!("dashboard::tls", "persist: writing cert ({}B) to {}",
-          cert_pem.len(), cert_path.display());
+    dlog!(
+        "dashboard::tls",
+        "persist: writing cert ({}B) to {}",
+        cert_pem.len(),
+        cert_path.display()
+    );
     // Cert is public; default perms (0644) are fine.
-    fs::write(cert_path, cert_pem)
-        .map_err(|e| {
+    fs::write(cert_path, cert_pem).map_err(|e| {
             dlog!("dashboard::tls", "cert write failed: {}", e);
             format!("Cannot write cert {}: {}", cert_path.display(), e)
         })?;
-    dlog!("dashboard::tls", "persist: writing key ({}B) to {}",
-          key_pem.len(), key_path.display());
+    dlog!(
+        "dashboard::tls",
+        "persist: writing key ({}B) to {}",
+        key_pem.len(),
+        key_path.display()
+    );
 
     // Private key must be 0600 — write to tmp + rename so the file is never
     // visible at the default umask between create and chmod.
@@ -242,16 +263,14 @@ fn persist(
                 .map_err(|e| format!("Cannot write key: {}", e))?;
             let _ = f.sync_all();
         }
-        fs::rename(&tmp, key_path)
-            .map_err(|e| {
+        fs::rename(&tmp, key_path).map_err(|e| {
                 dlog!("dashboard::tls", "key tmp rename failed: {}", e);
                 format!("Cannot finalize key: {}", e)
             })?;
     }
     #[cfg(not(unix))]
     {
-        fs::write(key_path, key_pem)
-            .map_err(|e| {
+        fs::write(key_path, key_pem).map_err(|e| {
                 dlog!("dashboard::tls", "key write failed: {}", e);
                 format!("Cannot write key: {}", e)
             })?;
@@ -347,13 +366,16 @@ mod x509_minimal {
             p = h.rest;
         }
         // serial INTEGER
-        let h = read_any(p)?; p = h.rest;
+        let h = read_any(p)?;
+        p = h.rest;
         let _ = h;
         // sigAlg SEQUENCE
-        let h = read_any(p)?; p = h.rest;
+        let h = read_any(p)?;
+        p = h.rest;
         let _ = h;
         // issuer SEQUENCE
-        let h = read_any(p)?; p = h.rest;
+        let h = read_any(p)?;
+        p = h.rest;
         let _ = h;
         // validity SEQUENCE { notBefore, notAfter }
         let validity = read_sequence(p)?;
@@ -363,10 +385,12 @@ mod x509_minimal {
         let not_after_unix = parse_time(na.tag, na.contents)?;
 
         // subject SEQUENCE
-        let h = read_any(p)?; p = h.rest;
+        let h = read_any(p)?;
+        p = h.rest;
         let _ = h;
         // spki SEQUENCE
-        let h = read_any(p)?; p = h.rest;
+        let h = read_any(p)?;
+        p = h.rest;
         let _ = h;
 
         // Optional [1], [2] (issuerUniqueID, subjectUniqueID), then [3] extensions
@@ -383,9 +407,12 @@ mod x509_minimal {
                     ep = ext.rest;
                     // Extension ::= SEQUENCE { OID, critical?, OCTET STRING }
                     let mut xp = ext.contents;
-                    let oid = read_any(xp)?; xp = oid.rest;
-                    if oid.tag != 0x06 { continue; }
-                    let is_san = oid.contents == &[0x55, 0x1d, 0x11];
+                    let oid = read_any(xp)?;
+                    xp = oid.rest;
+                    if oid.tag != 0x06 {
+                        continue;
+                    }
+                    let is_san = oid.contents == [0x55, 0x1d, 0x11];
                     // Optional BOOLEAN critical
                     let next_tag = xp.first().copied().unwrap_or(0);
                     if next_tag == 0x01 {
@@ -402,15 +429,20 @@ mod x509_minimal {
                                 gp = g.rest;
                                 match g.tag {
                                     // [2] IA5String dNSName
-                                    0x82 => if let Ok(s) = std::str::from_utf8(g.contents) {
+                                    0x82 => {
+                                        if let Ok(s) = std::str::from_utf8(g.contents) {
                                         sans.push(s.to_string());
-                                    },
+                                        }
+                                    }
                                     // [7] OCTET STRING iPAddress
                                     0x87 => {
                                         if g.contents.len() == 4 {
                                             let ip = std::net::Ipv4Addr::new(
-                                                g.contents[0], g.contents[1],
-                                                g.contents[2], g.contents[3]);
+                                                g.contents[0],
+                                                g.contents[1],
+                                                g.contents[2],
+                                                g.contents[3],
+                                            );
                                             sans.push(ip.to_string());
                                         } else if g.contents.len() == 16 {
                                             let mut a = [0u8; 16];
@@ -428,7 +460,10 @@ mod x509_minimal {
             }
         }
 
-        Ok(ParsedCert { not_after_unix, sans })
+        Ok(ParsedCert {
+            not_after_unix,
+            sans,
+        })
     }
 
     struct Header<'a> {
@@ -438,11 +473,15 @@ mod x509_minimal {
     }
 
     fn read_any(input: &[u8]) -> Result<Header<'_>, &'static str> {
-        if input.is_empty() { return Err("eof"); }
+        if input.is_empty() {
+            return Err("eof");
+        }
         let tag = input[0];
         let (len, len_bytes) = read_length(&input[1..])?;
         let header_len = 1 + len_bytes;
-        if input.len() < header_len + len { return Err("len overflow"); }
+        if input.len() < header_len + len {
+            return Err("len overflow");
+        }
         Ok(Header {
             tag,
             contents: &input[header_len..header_len + len],
@@ -452,20 +491,28 @@ mod x509_minimal {
 
     fn read_sequence(input: &[u8]) -> Result<Header<'_>, &'static str> {
         let h = read_any(input)?;
-        if h.tag != 0x30 { return Err("expected SEQUENCE"); }
+        if h.tag != 0x30 {
+            return Err("expected SEQUENCE");
+        }
         Ok(h)
     }
 
     fn read_length(input: &[u8]) -> Result<(usize, usize), &'static str> {
-        if input.is_empty() { return Err("len eof"); }
+        if input.is_empty() {
+            return Err("len eof");
+        }
         let first = input[0];
         if first & 0x80 == 0 {
             return Ok((first as usize, 1));
         }
         let n = (first & 0x7F) as usize;
-        if n == 0 || n > 4 || input.len() < 1 + n { return Err("bad len"); }
+        if n == 0 || n > 4 || input.len() < 1 + n {
+            return Err("bad len");
+        }
         let mut v = 0usize;
-        for i in 0..n { v = (v << 8) | input[1 + i] as usize; }
+        for i in 0..n {
+            v = (v << 8) | input[1 + i] as usize;
+        }
         Ok((v, 1 + n))
     }
 
@@ -475,19 +522,25 @@ mod x509_minimal {
         let s = s.trim_end_matches('Z');
         let (year, rest) = match tag {
             0x17 => {
-                if s.len() < 12 { return Err("utctime short"); }
+                if s.len() < 12 {
+                    return Err("utctime short");
+                }
                 let yy: i32 = s[..2].parse().map_err(|_| "utctime year")?;
                 let year = if yy >= 50 { 1900 + yy } else { 2000 + yy };
                 (year, &s[2..])
             }
             0x18 => {
-                if s.len() < 14 { return Err("gentime short"); }
+                if s.len() < 14 {
+                    return Err("gentime short");
+                }
                 let yyyy: i32 = s[..4].parse().map_err(|_| "gentime year")?;
                 (yyyy, &s[4..])
             }
             _ => return Err("unknown time tag"),
         };
-        if rest.len() < 10 { return Err("time short"); }
+        if rest.len() < 10 {
+            return Err("time short");
+        }
         let mo: u32 = rest[0..2].parse().map_err(|_| "mo")?;
         let da: u32 = rest[2..4].parse().map_err(|_| "da")?;
         let hh: u32 = rest[4..6].parse().map_err(|_| "hh")?;

@@ -9,8 +9,26 @@ use std::path::Path;
 pub enum ServiceStatus {
     Running,
     Stopped,
+    DirectRunning(String),
+    DirectStopped(String),
     NotInstalled,
     Unknown(String),
+}
+
+impl ServiceStatus {
+    pub fn is_running(&self) -> bool {
+        matches!(
+            self,
+            ServiceStatus::Running | ServiceStatus::DirectRunning(_)
+        )
+    }
+
+    pub fn service_registration_unavailable(&self) -> bool {
+        matches!(
+            self,
+            ServiceStatus::DirectRunning(_) | ServiceStatus::DirectStopped(_)
+        )
+    }
 }
 
 impl std::fmt::Display for ServiceStatus {
@@ -18,6 +36,8 @@ impl std::fmt::Display for ServiceStatus {
         match self {
             ServiceStatus::Running => write!(f, "Running"),
             ServiceStatus::Stopped => write!(f, "Stopped"),
+            ServiceStatus::DirectRunning(s) => write!(f, "Running direct ({})", s),
+            ServiceStatus::DirectStopped(s) => write!(f, "Stopped direct ({})", s),
             ServiceStatus::NotInstalled => write!(f, "Not installed"),
             ServiceStatus::Unknown(s) => write!(f, "Unknown ({})", s),
         }
@@ -32,8 +52,12 @@ pub trait ServiceManager: Send + Sync {
     fn stop(&self) -> Result<(), String>;
     /// Restart the service (stop + start with existing config).
     fn restart(&self, binary_path: &Path, tokens: &[String]) -> Result<(), String> {
-        dlog!("service", "restart: stop + start (bin={}, tokens={})",
-              binary_path.display(), tokens.len());
+        dlog!(
+            "service",
+            "restart: stop + start (bin={}, tokens={})",
+            binary_path.display(),
+            tokens.len()
+        );
         match self.stop() {
             Ok(_)  => dlog!("service", "restart: stop ok"),
             Err(e) => dlog!("service", "restart: stop returned err (continuing): {}", e),
@@ -57,8 +81,6 @@ pub fn manager() -> Box<dyn ServiceManager + Send + Sync> {
     match crate::core::platform::Os::detect() {
         crate::core::platform::Os::MacOS => Box::new(launchd::LaunchdManager::new()),
         crate::core::platform::Os::Linux => Box::new(systemd::SystemdManager::new()),
-        crate::core::platform::Os::Windows => {
-            Box::new(taskscheduler::TaskSchedulerManager::new())
-        }
+        crate::core::platform::Os::Windows => Box::new(taskscheduler::TaskSchedulerManager::new()),
     }
 }

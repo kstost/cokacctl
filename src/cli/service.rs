@@ -7,8 +7,11 @@ pub fn start() -> Result<(), String> {
     let config = Config::load();
     let tokens = config.active_tokens();
     if tokens.is_empty() {
-        dlog!("cli::service", "start: refused — no active tokens (total {})",
-              config.tokens.len());
+        dlog!(
+            "cli::service",
+            "start: refused — no active tokens (total {})",
+            config.tokens.len()
+        );
         return Err("No active tokens configured. Use 'cokacctl token <TOKEN>' first.".into());
     }
     dlog!("cli::service", "start: {} active tokens", tokens.len());
@@ -17,9 +20,10 @@ pub fn start() -> Result<(), String> {
         "cokacdir not found in PATH. Run 'cokacctl install' first.".to_string()
     })?;
     let mgr = service::manager();
+    let target = management_target(&*mgr);
     dlog!("cli::service", "Binary: {}", binary_path.display());
 
-    println!("  Starting cokacdir service...");
+    println!("  Starting cokacdir {}...", target);
     println!("  Binary: {}", binary_path.display());
     println!("  Tokens: {} bot(s)", tokens.len());
 
@@ -29,7 +33,7 @@ pub fn start() -> Result<(), String> {
     })?;
 
     dlog!("cli::service", "Service started");
-    println!("  Service started.");
+    println!("  cokacdir {} started.", target);
     print_management_hints(&*mgr);
     Ok(())
 }
@@ -37,13 +41,14 @@ pub fn start() -> Result<(), String> {
 pub fn stop() -> Result<(), String> {
     dlog!("cli::service", "stop: begin");
     let mgr = service::manager();
-    println!("  Stopping cokacdir service...");
+    let target = management_target(&*mgr);
+    println!("  Stopping cokacdir {}...", target);
     mgr.stop().map_err(|e| {
         dlog!("cli::service", "stop: mgr.stop failed: {}", e);
         e
     })?;
     dlog!("cli::service", "Service stopped");
-    println!("  Service stopped.");
+    println!("  cokacdir {} stopped.", target);
     Ok(())
 }
 
@@ -60,28 +65,40 @@ pub fn restart() -> Result<(), String> {
         "cokacdir not found in PATH. Run 'cokacctl install' first.".to_string()
     })?;
     let mgr = service::manager();
-    dlog!("cli::service", "restart: bin={} tokens={}", binary_path.display(), tokens.len());
+    let target = management_target(&*mgr);
+    dlog!(
+        "cli::service",
+        "restart: bin={} tokens={}",
+        binary_path.display(),
+        tokens.len()
+    );
 
-    println!("  Restarting cokacdir service...");
+    println!("  Restarting cokacdir {}...", target);
     mgr.restart(&binary_path, &tokens).map_err(|e| {
         dlog!("cli::service", "restart: mgr.restart failed: {}", e);
         e
     })?;
     dlog!("cli::service", "Service restarted");
-    println!("  Service restarted.");
+    println!("  cokacdir {} restarted.", target);
     Ok(())
 }
 
 pub fn remove() -> Result<(), String> {
     dlog!("cli::service", "remove: begin");
     let mgr = service::manager();
-    println!("  Removing cokacdir service...");
+    if mgr.status().service_registration_unavailable() {
+        return Err(
+            "Service registration is unavailable in direct mode. Use 'cokacctl stop' to stop the direct process."
+                .into(),
+        );
+    }
+    println!("  Removing cokacdir service registration...");
     mgr.remove().map_err(|e| {
         dlog!("cli::service", "remove: mgr.remove failed: {}", e);
         e
     })?;
     dlog!("cli::service", "Service removed");
-    println!("  Service removed.");
+    println!("  Service registration removed.");
     Ok(())
 }
 
@@ -93,7 +110,11 @@ pub fn log() -> Result<(), String> {
         "Log file path not available.".to_string()
     })?;
     if !log_path.exists() {
-        dlog!("cli::service", "log: file missing at {}", log_path.display());
+        dlog!(
+            "cli::service",
+            "log: file missing at {}",
+            log_path.display()
+        );
         return Err(format!("Log file not found: {}", log_path.display()));
     }
     dlog!("cli::service", "Tailing: {}", log_path.display());
@@ -104,19 +125,30 @@ pub fn log() -> Result<(), String> {
 pub fn token(tokens: Vec<String>) -> Result<(), String> {
     let raw_count = tokens.len();
     let tokens = dedup_tokens(tokens);
-    dlog!("cli::service", "token: raw={} dedup={}", raw_count, tokens.len());
+    dlog!(
+        "cli::service",
+        "token: raw={} dedup={}",
+        raw_count,
+        tokens.len()
+    );
 
     let mut config = Config::load();
     let prev = config.tokens.len();
     config.tokens = tokens.clone();
     config.disabled_tokens.clear();
     config.token_names.retain(|t, _| tokens.contains(t));
+    config.token_bot_info.retain(|t, _| tokens.contains(t));
     config.save().map_err(|e| {
         dlog!("cli::service", "token: config.save failed: {}", e);
         e
     })?;
 
-    dlog!("cli::service", "Tokens saved (prev={} new={})", prev, tokens.len());
+    dlog!(
+        "cli::service",
+        "Tokens saved (prev={} new={})",
+        prev,
+        tokens.len()
+    );
     println!("  {} bot token(s) registered.", tokens.len());
     Ok(())
 }
@@ -139,6 +171,14 @@ fn print_management_hints(mgr: &dyn ServiceManager) {
     }
 }
 
+fn management_target(mgr: &dyn ServiceManager) -> &'static str {
+    if mgr.status().service_registration_unavailable() {
+        "direct process"
+    } else {
+        "service"
+    }
+}
+
 fn tail_file(path: &std::path::Path) -> Result<(), String> {
     // Read bytes and lossy-decode so non-UTF8 bytes in the log don't cause
     // the whole command to fail.
@@ -148,25 +188,35 @@ fn tail_file(path: &std::path::Path) -> Result<(), String> {
     })?;
     let content = String::from_utf8_lossy(&bytes);
     let lines: Vec<&str> = content.lines().collect();
-    let start = if lines.len() > 20 { lines.len() - 20 } else { 0 };
-    dlog!("cli::service", "tail: initial dump {} lines (of {})",
-          lines.len() - start, lines.len());
+    let start = if lines.len() > 20 {
+        lines.len() - 20
+    } else {
+        0
+    };
+    dlog!(
+        "cli::service",
+        "tail: initial dump {} lines (of {})",
+        lines.len() - start,
+        lines.len()
+    );
     for line in &lines[start..] {
         println!("{}", line);
     }
 
-    let file = std::fs::File::open(path)
-        .map_err(|e| {
+    let file = std::fs::File::open(path).map_err(|e| {
             dlog!("cli::service", "tail: open failed: {}", e);
             format!("Cannot open log: {}", e)
         })?;
-    let metadata = file.metadata()
-        .map_err(|e| {
+    let metadata = file.metadata().map_err(|e| {
             dlog!("cli::service", "tail: metadata failed: {}", e);
             format!("Cannot get file metadata: {}", e)
         })?;
     let mut pos = metadata.len();
-    dlog!("cli::service", "tail: entering follow loop from offset {}", pos);
+    dlog!(
+        "cli::service",
+        "tail: entering follow loop from offset {}",
+        pos
+    );
 
     loop {
         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -175,8 +225,12 @@ fn tail_file(path: &std::path::Path) -> Result<(), String> {
             Err(_) => continue,
         };
         if current_len < pos {
-            dlog!("cli::service", "tail: file shrank ({} -> {}), rewinding",
-                  pos, current_len);
+            dlog!(
+                "cli::service",
+                "tail: file shrank ({} -> {}), rewinding",
+                pos,
+                current_len
+            );
             pos = 0;
         }
         if current_len > pos {

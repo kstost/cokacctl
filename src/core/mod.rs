@@ -4,6 +4,7 @@ pub mod platform;
 pub mod version;
 pub mod download;
 pub mod config;
+pub mod telegram;
 
 /// Progress message for background operations displayed in TUI.
 pub enum ProgressMsg {

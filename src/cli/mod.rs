@@ -1,7 +1,7 @@
 pub mod install;
-pub mod update;
 pub mod service;
 pub mod uninstall;
+pub mod update;
 
 use clap::{Parser, Subcommand};
 
@@ -11,25 +11,25 @@ use clap::{Parser, Subcommand};
 #[command(about = "cokacdir installation and service manager")]
 #[command(long_about = "\
 cokacctl is the CLI/TUI tool for installing, updating, and managing cokacdir \
-as a background service. cokacdir runs as a Telegram bot.
+as a background service or direct background process. cokacdir runs as a Telegram bot.
 
 Running without any command launches an interactive TUI dashboard. \
 All TUI features are also available as CLI commands listed below.
 
 Supported platforms:
   - macOS (Apple Silicon & Intel) via launchd
-  - Linux (x86_64 & ARM64) via systemd
+  - Linux (x86_64 & ARM64) via systemd, with direct mode when systemd user services are unavailable
   - Windows (x86_64 & ARM64) via Task Scheduler")]
 #[command(after_help = "\
 Quick Start:
   cokacctl install                  Download and install cokacdir
   cokacctl token <TOKEN>            Register a Telegram bot token
-  cokacctl start                    Start the background service
+  cokacctl start                    Start the background service/process
 
 Service Management:
-  cokacctl stop                     Stop the running service
+  cokacctl stop                     Stop the running service/process
   cokacctl restart                  Restart with current tokens
-  cokacctl remove                   Unregister the service entirely
+  cokacctl remove                   Unregister the service entirely (not used in direct mode)
   cokacctl log                      Tail service output in real time
 
 Monitoring:
@@ -49,6 +49,7 @@ Interactive Mode:
 Notes:
   - Tokens are persisted in ~/.cokacdir/cokacctl.json
   - 'start' requires tokens to be registered beforehand via 'token'
+  - On Linux without usable systemd user services, start/restart/stop manage a direct background process
   - 'update' automatically stops and restarts the service if it was running
   - 'restart' reuses the previously registered tokens")]
 pub struct Cli {
@@ -67,7 +68,12 @@ pub struct Cli {
     /// use, cokacctl walks forward to the next free port (up to 20 attempts)
     /// and prints the port it actually bound. Applies to both loopback and
     /// --inbound modes. Requires --dashboard.
-    #[arg(long, value_name = "PORT", requires = "dashboard", default_value_t = 38573)]
+    #[arg(
+        long,
+        value_name = "PORT",
+        requires = "dashboard",
+        default_value_t = 38573
+    )]
     pub port: u16,
 
     /// Bind the dashboard to all interfaces so other hosts on the network can
@@ -100,23 +106,24 @@ service status (Running/Stopped/Not installed), registered token count, \
 and log file location.")]
     Status,
 
-    /// Start the background service
+    /// Start the background service/process
     #[command(long_about = "\
 Start cokacdir as a background service using previously registered tokens. \
 Tokens must be registered first via 'cokacctl token <TOKEN>'. \
 On macOS uses launchd, on Linux uses systemd, on Windows uses Task Scheduler. \
-The service is configured to auto-start on login/boot.")]
+When Linux service registration is unavailable, starts a detached direct \
+background process instead. Direct mode does not auto-start on login/boot.")]
     Start,
 
-    /// Stop the background service
+    /// Stop the background service/process
     #[command(long_about = "\
-Stop the running cokacdir service. The service registration remains \
-so it can be started again with 'cokacctl start'.")]
+Stop the running cokacdir service or direct background process. The service \
+registration remains when a service manager is available.")]
     Stop,
 
-    /// Restart the background service
+    /// Restart the background service/process
     #[command(long_about = "\
-Stop and start the service using the currently registered tokens. \
+Stop and start the service or direct background process using the currently registered tokens. \
 Equivalent to 'cokacctl stop' followed by 'cokacctl start'.")]
     Restart,
 
@@ -124,7 +131,8 @@ Equivalent to 'cokacctl stop' followed by 'cokacctl start'.")]
     #[command(long_about = "\
 Stop the service and remove its registration (launchd plist, \
 systemd unit, or scheduled task). After removal, 'cokacctl start' \
-will re-register the service from scratch.")]
+will re-register the service from scratch. Direct mode has no service \
+registration to remove.")]
     Remove,
 
     /// Tail the service log in real time

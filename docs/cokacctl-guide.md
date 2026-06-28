@@ -214,7 +214,9 @@ cokacctl start
 - PowerShell을 통해 실행:
   - `New-ScheduledTaskAction` — 실행 바이너리 및 인자 설정
   - `New-ScheduledTaskTrigger -AtLogon` — 로그인 시 자동 시작
-  - `Register-ScheduledTask -RunLevel Highest` — 관리자 권한으로 실행
+  - `Register-ScheduledTask` — 현재 Windows 사용자로 등록
+    - 관리자 권한으로 실행 중이면 `RunLevel Highest`
+    - 일반 권한이면 `RunLevel Limited`
   - `Start-ScheduledTask` — 즉시 시작
 - 작업 디렉토리는 `%USERPROFILE%`로 설정됩니다.
 

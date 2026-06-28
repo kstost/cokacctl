@@ -1,8 +1,13 @@
 use super::{ServiceManager, ServiceStatus};
 use crate::core::platform::ServicePaths;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as UnixCommandExt;
 
 const SERVICE_NAME: &str = "cokacdir";
 
@@ -10,6 +15,25 @@ const SERVICE_NAME: &str = "cokacdir";
 /// every 5 s with identical lines while the user session is in a steady state.
 /// Only state transitions are logged.
 static LAST_STATUS_KEY: Mutex<String> = Mutex::new(String::new());
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DirectProcessRecord {
+    #[serde(default = "direct_record_schema_version")]
+    schema_version: u32,
+    pid: u32,
+    #[serde(default)]
+    process_group_id: Option<u32>,
+    #[serde(default)]
+    binary_path: String,
+    #[serde(default)]
+    token_count: usize,
+    #[serde(default)]
+    started_at_epoch_s: u64,
+}
+
+fn direct_record_schema_version() -> u32 {
+    1
+}
 
 pub struct SystemdManager {
     paths: ServicePaths,
@@ -82,44 +106,567 @@ impl SystemdManager {
         Some(Self::user_runtime_dir().join("bus"))
     }
 
-    /// Long-form remediation text shown by `start()` when the user D-Bus
-    /// socket is missing.
-    ///
-    /// Linux exposes no authoritative in-guest API for "am I on WSL?", so
-    /// rather than guessing the user's environment from kernel-identity
-    /// strings, this message enumerates every known cause and lets the
-    /// reader pick the one that applies. No detection logic, no false
-    /// positives.
-    fn user_bus_missing_long(bus_path: &Path) -> String {
-        format!(
-            "User systemd bus not available at {}.\n\
-             The per-user systemd manager isn't reachable for this session.\n\
-             \n\
-             Pick the case that matches your environment:\n\
-             \n\
-             1) Standard Linux, lingering disabled:\n\
-                  loginctl enable-linger $USER\n\
-                then re-open the terminal as a login shell.\n\
-             \n\
-             2) Bus simply not started for this session:\n\
-                  systemctl --user start dbus.socket\n\
-             \n\
-             3) WSL2 without systemd enabled — add to /etc/wsl.conf:\n\
-                  [boot]\n\
-                  systemd=true\n\
-                then in PowerShell:  wsl --shutdown\n\
-                and re-open the terminal.\n\
-             \n\
-             4) WSL1 — systemd is not supported. In PowerShell (Administrator):\n\
-                  wsl --set-version <DistroName> 2",
-            bus_path.display()
-        )
+    fn container_runtime() -> Option<&'static str> {
+        if Path::new("/.dockerenv").exists() {
+            return Some("Docker");
+        }
+        if Path::new("/run/.containerenv").exists() {
+            return Some("container");
+        }
+
+        for cgroup in ["/proc/1/cgroup", "/proc/self/cgroup"] {
+            let Ok(content) = std::fs::read_to_string(cgroup) else {
+                continue;
+            };
+            let lower = content.to_ascii_lowercase();
+            if lower.contains("docker") {
+                return Some("Docker");
+            }
+            if lower.contains("kubepods") {
+                return Some("Kubernetes");
+            }
+            if lower.contains("containerd") {
+                return Some("containerd");
+            }
+            if lower.contains("podman") || lower.contains("libpod") {
+                return Some("Podman");
+            }
+        }
+
+        None
     }
 
-    /// One-line variant of `user_bus_missing_long` for the dashboard / TUI
-    /// status field. Neutral wording — no platform guess.
-    fn user_bus_missing_short() -> String {
-        "Per-user systemd bus unavailable".into()
+    fn service_manager_unavailable_short(cause: &str) -> String {
+        if let Some(runtime) = Self::container_runtime() {
+        format!(
+                "service manager unavailable in {} container ({})",
+                runtime, cause
+            )
+        } else {
+            format!("service manager unavailable ({})", cause)
+        }
+    }
+
+    fn service_manager_unavailable_long(cause: &str) -> String {
+        if let Some(runtime) = Self::container_runtime() {
+            format!(
+                "Service registration is unavailable in this {} container ({}).\n\
+                 cokacctl's Linux service backend requires systemd user services \
+                 via `systemctl --user`.\n\
+             \n\
+                 Run cokacdir as the container's foreground process or manage it \
+                 with the container runtime/host service manager instead.",
+                runtime, cause
+            )
+        } else {
+            format!(
+                "Service registration is unavailable in this Linux session ({}).\n\
+                 cokacctl's Linux service backend requires systemd user services \
+                 via `systemctl --user`.",
+                cause
+        )
+    }
+    }
+
+    fn systemctl_exec_error_detail(e: &std::io::Error) -> String {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            "systemctl not found".into()
+        } else {
+            format!("cannot run systemctl: {}", e)
+        }
+    }
+
+    fn probe_systemctl() -> Result<Output, String> {
+        let out = Command::new("systemctl")
+            .arg("--version")
+            .output()
+            .map_err(|e| Self::systemctl_exec_error_detail(&e))?;
+        if out.status.success() {
+            Ok(out)
+        } else {
+            Err(format!(
+                "systemctl --version failed ({})",
+                Self::output_detail(&out)
+            ))
+        }
+    }
+
+    fn output_mentions_user_bus_failure(output: &Output) -> bool {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+        let combined = format!("{}\n{}", stderr, stdout);
+        (combined.contains("failed to connect") && combined.contains("bus"))
+            || combined.contains("no medium found")
+            || (combined.contains("no such file or directory") && combined.contains("bus"))
+            || (combined.contains("host is down") && combined.contains("bus"))
+    }
+
+    fn service_manager_unavailable_cause() -> Option<String> {
+        if let Err(cause) = Self::probe_systemctl() {
+            return Some(cause);
+        }
+
+        if let Some(bus_path) = Self::user_bus_socket_path() {
+            if !bus_path.exists() {
+                return Some("user systemd bus unavailable".into());
+            }
+        }
+
+        match Self::user_systemctl_cmd(["show-environment"]).output() {
+            Ok(out) if out.status.success() => None,
+            Ok(out) if Self::output_mentions_user_bus_failure(&out) => {
+                Some("user systemd bus unavailable".into())
+            }
+            Ok(out) => Some(format!(
+                "systemctl --user unavailable ({})",
+                Self::output_detail(&out)
+            )),
+            Err(e) => Some(Self::systemctl_exec_error_detail(&e)),
+        }
+    }
+
+    fn direct_status(&self, cause: &str) -> ServiceStatus {
+        let reason = Self::service_manager_unavailable_short(cause);
+        if self.direct_managed_process_running() {
+            ServiceStatus::DirectRunning(reason)
+        } else {
+            ServiceStatus::DirectStopped(reason)
+        }
+    }
+
+    fn direct_pid_file(&self) -> PathBuf {
+        self.paths.log_dir.join("cokacdir.pid")
+    }
+
+    fn read_direct_pid_record(&self) -> Option<DirectProcessRecord> {
+        let content = std::fs::read_to_string(self.direct_pid_file()).ok()?;
+        if let Ok(record) = serde_json::from_str::<DirectProcessRecord>(&content) {
+            if record.pid > 0 {
+                return Some(record);
+            }
+        }
+
+        let mut lines = content.lines();
+        let pid = lines.next()?.trim().parse::<u32>().ok()?;
+        let binary_path = lines
+            .next()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_default();
+        Some(DirectProcessRecord {
+            schema_version: direct_record_schema_version(),
+            pid,
+            process_group_id: None,
+            binary_path,
+            token_count: 0,
+            started_at_epoch_s: 0,
+        })
+    }
+
+    fn write_direct_pid_record(&self, record: &DirectProcessRecord) -> Result<(), String> {
+        let content = serde_json::to_string_pretty(record)
+            .map_err(|e| format!("Cannot serialize direct process metadata: {}", e))?;
+        let pid_file = self.direct_pid_file();
+        let tmp = pid_file.with_extension("pid.tmp");
+        std::fs::write(&tmp, content)
+            .map_err(|e| format!("Cannot write direct pid temp file: {}", e))?;
+        std::fs::rename(&tmp, &pid_file)
+            .map_err(|e| format!("Cannot finalize direct pid file: {}", e))
+    }
+
+    fn pid_running(pid: u32) -> bool {
+        let proc_dir = format!("/proc/{}", pid);
+        if !Path::new(&proc_dir).exists() {
+            return false;
+        }
+        if let Ok(status) = std::fs::read_to_string(format!("{}/status", proc_dir)) {
+            if status
+                .lines()
+                .find(|line| line.starts_with("State:"))
+                .map(|line| line.split_whitespace().nth(1) == Some("Z"))
+                .unwrap_or(false)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn process_args(pid: u32) -> Option<Vec<String>> {
+        let bytes = std::fs::read(format!("/proc/{}/cmdline", pid)).ok()?;
+        let args = bytes
+            .split(|byte| *byte == 0)
+            .filter(|arg| !arg.is_empty())
+            .map(|arg| String::from_utf8_lossy(arg).into_owned())
+            .collect::<Vec<_>>();
+        if args.is_empty() {
+            None
+        } else {
+            Some(args)
+        }
+    }
+
+    fn program_name_is_cokacdir(program: &str) -> bool {
+        Path::new(program)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name == SERVICE_NAME)
+            .unwrap_or(false)
+    }
+
+    fn args_match_direct_record(args: &[String], record: &DirectProcessRecord) -> bool {
+        if record.binary_path.is_empty() {
+            let Some(program) = args.first() else {
+                return false;
+            };
+            if !Self::program_name_is_cokacdir(program) {
+                return false;
+            }
+            return Self::args_have_ccserver_marker_after(args, 0);
+        }
+
+        args.iter()
+            .position(|arg| arg == &record.binary_path)
+            .map(|pos| Self::args_have_ccserver_marker_after(args, pos))
+            .unwrap_or(false)
+    }
+
+    fn args_have_ccserver_marker_after(args: &[String], program_pos: usize) -> bool {
+        args.get(program_pos + 1).map(String::as_str) == Some("--ccserver")
+            && args.get(program_pos + 2).map(String::as_str) == Some("--")
+    }
+
+    fn pid_matches_direct_record(record: &DirectProcessRecord) -> bool {
+        let pid = record.pid;
+        if !Self::pid_running(pid) {
+            return false;
+        }
+
+        if let Some(args) = Self::process_args(pid) {
+            return Self::args_match_direct_record(&args, record);
+        }
+
+        if !record.binary_path.is_empty() {
+            dlog!(
+                "systemd",
+                "direct pid cmdline unavailable; refusing to verify pid {} with binary metadata",
+                pid
+            );
+            return false;
+        }
+
+        if let Some(group_pid) = record.process_group_id {
+            if group_pid != pid {
+                return false;
+            }
+        }
+
+        std::fs::read_to_string(format!("/proc/{}/comm", pid))
+            .map(|s| s.trim() == SERVICE_NAME)
+            .unwrap_or(false)
+    }
+
+    fn direct_managed_process_running(&self) -> bool {
+        let Some(record) = self.read_direct_pid_record() else {
+            return false;
+        };
+        let running = Self::pid_matches_direct_record(&record);
+        if !running {
+            dlog!(
+                "systemd",
+                "direct process metadata is stale or unverified (pid={})",
+                record.pid
+            );
+            let _ = std::fs::remove_file(self.direct_pid_file());
+        }
+        running
+    }
+
+    #[cfg(unix)]
+    fn terminate_pid(pid: u32) -> Result<(), String> {
+        let pid = pid as libc::pid_t;
+        if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+            if !Self::pid_running(pid as u32) {
+                return Ok(());
+            }
+            return Err(format!("cannot terminate direct process pid {}", pid));
+        }
+
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if !Self::pid_running(pid as u32) {
+                return Ok(());
+            }
+        }
+
+        if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
+            if !Self::pid_running(pid as u32) {
+                return Ok(());
+            }
+            return Err(format!("cannot kill direct process pid {}", pid));
+        }
+        for _ in 0..10 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if !Self::pid_running(pid as u32) {
+                return Ok(());
+            }
+        }
+        if Self::pid_running(pid as u32) {
+            return Err(format!("direct process pid {} is still alive", pid));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn terminate_pid(pid: u32) -> Result<(), String> {
+        Err(format!("cannot terminate direct process pid {}", pid))
+    }
+
+    #[cfg(unix)]
+    fn configure_direct_command(command: &mut Command) {
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn configure_direct_command(_command: &mut Command) {}
+
+    #[cfg(unix)]
+    fn terminate_process_group(pid: u32) -> Result<(), String> {
+        if pid == 0 || pid > i32::MAX as u32 {
+            return Err(format!("invalid direct process group pid {}", pid));
+        }
+
+        let pgid = -(pid as libc::pid_t);
+        if unsafe { libc::kill(pgid, libc::SIGTERM) } != 0 && Self::pid_running(pid) {
+            dlog!(
+                "systemd",
+                "direct process group SIGTERM failed for pgid {}: {}",
+                pgid,
+                std::io::Error::last_os_error()
+            );
+        }
+
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if !Self::pid_running(pid) {
+                return Ok(());
+            }
+        }
+
+        if unsafe { libc::kill(pgid, libc::SIGKILL) } != 0 && Self::pid_running(pid) {
+            return Err(format!(
+                "cannot kill direct process group {}: {}",
+                pid,
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        for _ in 0..10 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if !Self::pid_running(pid) {
+                return Ok(());
+            }
+        }
+        if Self::pid_running(pid) {
+            return Err(format!("direct process group {} is still alive", pid));
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn terminate_process_group(pid: u32) -> Result<(), String> {
+        Self::terminate_pid(pid)
+    }
+
+    fn terminate_direct_record(record: &DirectProcessRecord) -> Result<(), String> {
+        if record.process_group_id == Some(record.pid) {
+            match Self::terminate_process_group(record.pid) {
+                Ok(()) => Ok(()),
+                Err(e) if Self::pid_running(record.pid) => {
+                    dlog!(
+                        "systemd",
+                        "direct process group termination failed, falling back to pid: {}",
+                        e
+                    );
+                    Self::terminate_pid(record.pid)
+                }
+                Err(_) => Ok(()),
+            }
+        } else {
+            Self::terminate_pid(record.pid)
+        }
+    }
+
+    fn current_epoch_s() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    fn direct_error_tail(&self) -> String {
+        let err_bytes = std::fs::read(&self.paths.error_log_file).unwrap_or_default();
+        let err_output = String::from_utf8_lossy(&err_bytes);
+        err_output
+            .lines()
+            .rev()
+            .take(10)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn direct_start(
+        &self,
+        binary_path: &Path,
+        tokens: &[String],
+        cause: &str,
+    ) -> Result<(), String> {
+        dlog!(
+            "systemd",
+            "direct_start(): service manager unavailable: {}",
+            cause
+        );
+        std::fs::create_dir_all(&self.paths.log_dir)
+            .map_err(|e| format!("Cannot create log dir: {}", e))?;
+
+        let stop_result = self.direct_stop("pre-start cleanup");
+        if Self::cokacdir_process_running(false) {
+            return Err(match stop_result {
+                Ok(_) => "cokacdir is already running".to_string(),
+                Err(e) => format!("Cannot stop existing direct process: {}", e),
+            });
+        }
+        let stdout = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.paths.log_file)
+            .map_err(|e| format!("Cannot open direct log: {}", e))?;
+        let stderr = std::fs::File::create(&self.paths.error_log_file)
+            .map_err(|e| format!("Cannot open direct error log: {}", e))?;
+
+        dlog!(
+            "systemd",
+            "direct_start(): spawning detached direct process"
+        );
+        let mut command = Command::new(binary_path);
+        command
+            .arg("--ccserver")
+            .arg("--")
+            .args(tokens)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(stdout))
+            .stderr(std::process::Stdio::from(stderr));
+        Self::configure_direct_command(&mut command);
+        let child = command
+            .spawn()
+            .map_err(|e| format!("direct start failed: {}", e))?;
+        let pid = child.id();
+        std::thread::spawn(move || {
+            let mut child = child;
+            let _ = child.wait();
+        });
+        let record = DirectProcessRecord {
+            schema_version: direct_record_schema_version(),
+            pid,
+            process_group_id: Some(pid),
+            binary_path: binary_path.to_string_lossy().to_string(),
+            token_count: tokens.len(),
+            started_at_epoch_s: Self::current_epoch_s(),
+        };
+        if let Err(e) = self.write_direct_pid_record(&record) {
+            let _ = Self::terminate_process_group(pid);
+            return Err(e);
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if self.direct_managed_process_running() {
+            dlog!(
+                "systemd",
+                "direct_start(): process is running (pid={})",
+                pid
+            );
+            Ok(())
+        } else {
+            let _ = Self::terminate_process_group(pid);
+            let _ = std::fs::remove_file(self.direct_pid_file());
+            let tail = self.direct_error_tail();
+            if tail.trim().is_empty() {
+                Err("cokacdir direct process did not stay running".into())
+            } else {
+                Err(tail.trim().to_string())
+            }
+        }
+    }
+
+    fn direct_stop(&self, cause: &str) -> Result<(), String> {
+        dlog!("systemd", "direct_stop(): {}", cause);
+        if let Some(record) = self.read_direct_pid_record() {
+            if Self::pid_matches_direct_record(&record) {
+                Self::terminate_direct_record(&record)?;
+            } else {
+                dlog!(
+                    "systemd",
+                    "direct_stop(): refusing to terminate unverified pid {}",
+                    record.pid
+                );
+            }
+            let _ = std::fs::remove_file(self.direct_pid_file());
+        }
+
+        Ok(())
+    }
+
+    fn cokacdir_process_running(log: bool) -> bool {
+        if log {
+            dlog!(
+                "systemd",
+                "is_any_running(): checking pgrep {}...",
+                SERVICE_NAME
+            );
+        }
+        match Command::new("pgrep").args(["-x", SERVICE_NAME]).output() {
+            Ok(output) => {
+                if log {
+                    crate::core::debug::log_output(
+                        "systemd",
+                        &format!("pgrep -x {}", SERVICE_NAME),
+                        &output,
+                    );
+                }
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let pids = stdout.trim();
+                let found = output.status.success();
+                if log {
+                    dlog!(
+                        "systemd",
+                        "is_any_running(): pgrep exit={}, pids='{}', found={}",
+                        output.status.code().unwrap_or(-1),
+                        pids,
+                        found
+                    );
+                }
+                found
+            }
+            Err(e) => {
+                if log {
+                    dlog!("systemd", "is_any_running(): pgrep failed: {}", e);
+                }
+                false
+            }
+        }
     }
 
     /// Backfill `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` for child
@@ -183,9 +730,7 @@ impl SystemdManager {
         // Recover from a poisoned lock (would mean another thread panicked
         // while holding it) rather than propagating the panic — the cached
         // value is purely a dedup hint, not correctness-critical.
-        let mut last = LAST_STATUS_KEY
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut last = LAST_STATUS_KEY.lock().unwrap_or_else(|e| e.into_inner());
         if *last != key {
             *last = key.to_string();
             true
@@ -237,10 +782,7 @@ impl SystemdManager {
 
     fn systemd_version() -> u32 {
         dlog!("systemd", "systemd_version(): invoking systemctl --version");
-        let output = Command::new("systemctl")
-            .arg("--version")
-            .output()
-            .ok();
+        let output = Command::new("systemctl").arg("--version").output().ok();
         match output {
             Some(out) => {
                 crate::core::debug::log_output("systemd", "systemctl --version", &out);
@@ -250,8 +792,7 @@ impl SystemdManager {
                         .lines()
                         .next()
                         .and_then(|line| {
-                            line.split_whitespace()
-                                .find_map(|w| w.parse::<u32>().ok())
+                            line.split_whitespace().find_map(|w| w.parse::<u32>().ok())
                         })
                         .unwrap_or(0);
                     dlog!("systemd", "systemd version: {}", ver);
@@ -270,7 +811,10 @@ impl SystemdManager {
 
     fn generate_service(&self) -> String {
         let wrapper = Self::escape_systemd_arg(&self.paths.wrapper_script.to_string_lossy());
-        let log_dir = self.paths.log_dir.to_string_lossy()
+        let log_dir = self
+            .paths
+            .log_dir
+            .to_string_lossy()
             .replace('$', "$$")
             .replace('%', "%%");
 
@@ -314,71 +858,57 @@ impl SystemdManager {
 
 impl ServiceManager for SystemdManager {
     fn start(&self, binary_path: &Path, tokens: &[String]) -> Result<(), String> {
-        dlog!("systemd", "start() called - binary: {}, tokens: {}", binary_path.display(), tokens.len());
-        dlog!("systemd", "paths: log_dir={}, wrapper={}, service={}, log_file={}",
+        dlog!(
+            "systemd",
+            "start() called - binary: {}, tokens: {}",
+            binary_path.display(),
+            tokens.len()
+        );
+        dlog!(
+            "systemd",
+            "paths: log_dir={}, wrapper={}, service={}, log_file={}",
             self.paths.log_dir.display(),
             self.paths.wrapper_script.display(),
             self.paths.service_file.display(),
-            self.paths.log_file.display());
+            self.paths.log_file.display()
+        );
 
         // Pre-flight: verify binary exists and is executable so we fail early
         // with a clear message instead of relying on systemd's error reporting.
         match std::fs::metadata(binary_path) {
-            Ok(m) => dlog!("systemd", "binary metadata: is_file={}, len={}B, readonly={}",
-                m.is_file(), m.len(), m.permissions().readonly()),
+            Ok(m) => dlog!(
+                "systemd",
+                "binary metadata: is_file={}, len={}B, readonly={}",
+                m.is_file(),
+                m.len(),
+                m.permissions().readonly()
+            ),
             Err(e) => dlog!("systemd", "binary metadata probe failed: {}", e),
         }
 
-        dlog!("systemd", "start(): probing for systemctl binary");
-        match Command::new("systemctl").arg("--version").output() {
-            Ok(out) => {
-                crate::core::debug::log_output("systemd", "systemctl --version (probe)", &out);
-            }
-            Err(e) => {
-                dlog!("systemd", "systemctl not found: {}", e);
-                return Err("systemctl not found. This tool requires systemd.".into());
-            }
-        }
-
-        // Precheck: the user D-Bus socket must exist for `systemctl --user`
-        // to work. If it doesn't, no amount of env-var injection will help —
-        // the user manager simply isn't reachable. Fail with an actionable
-        // message instead of letting daemon-reload spit out the cryptic
-        // "Failed to connect to bus: No medium found".
-        //
-        // For non-path bus transports (abstract sockets, tcp, …) we cannot
-        // stat anything, so we skip the precheck and let systemctl talk.
-        match Self::user_bus_socket_path() {
-            Some(bus_path) => {
-                dlog!("systemd", "start(): checking user bus at {}", bus_path.display());
-                if !bus_path.exists() {
+        dlog!("systemd", "start(): checking service manager availability");
+        if let Some(cause) = Self::service_manager_unavailable_cause() {
                     dlog!(
                         "systemd",
-                        "start(): user bus socket missing: {}",
-                        bus_path.display()
+                "start(): service manager unavailable, using direct mode: {}",
+                cause
                     );
-                    return Err(Self::user_bus_missing_long(&bus_path));
-                }
+            return self.direct_start(binary_path, tokens, &cause);
             }
-            None => {
+
                 dlog!(
                     "systemd",
-                    "start(): DBUS_SESSION_BUS_ADDRESS uses non-path transport, skipping precheck"
+            "Creating log dir: {}",
+            self.paths.log_dir.display()
                 );
-            }
-        }
-
-        dlog!("systemd", "Creating log dir: {}", self.paths.log_dir.display());
-        std::fs::create_dir_all(&self.paths.log_dir)
-            .map_err(|e| {
+        std::fs::create_dir_all(&self.paths.log_dir).map_err(|e| {
                 dlog!("systemd", "create_dir_all(log_dir) failed: {}", e);
                 format!("Cannot create log dir: {}", e)
             })?;
         dlog!("systemd", "log dir ready");
         if let Some(parent) = self.paths.service_file.parent() {
             dlog!("systemd", "Creating systemd unit dir: {}", parent.display());
-            std::fs::create_dir_all(parent)
-                .map_err(|e| {
+            std::fs::create_dir_all(parent).map_err(|e| {
                     dlog!("systemd", "create_dir_all(unit) failed: {}", e);
                     format!("Cannot create systemd dir: {}", e)
                 })?;
@@ -387,7 +917,11 @@ impl ServiceManager for SystemdManager {
 
         let wrapper = Self::generate_wrapper(binary_path, tokens);
         dlog!("systemd", "wrapper generated: {} bytes", wrapper.len());
-        dlog!("systemd", "Writing wrapper to: {}", self.paths.wrapper_script.display());
+        dlog!(
+            "systemd",
+            "Writing wrapper to: {}",
+            self.paths.wrapper_script.display()
+        );
         // Write via tmp + rename with mode 0o700 applied at creation so tokens
         // are never visible under the default umask (0644).
         #[cfg(unix)]
@@ -411,8 +945,7 @@ impl ServiceManager for SystemdManager {
                         format!("Cannot create wrapper temp: {}", e)
                     })?;
                 dlog!("systemd", "wrapper tmp opened (mode 0o700)");
-                file.write_all(wrapper.as_bytes())
-                    .map_err(|e| {
+                file.write_all(wrapper.as_bytes()).map_err(|e| {
                         dlog!("systemd", "wrapper tmp write_all failed: {}", e);
                         format!("Cannot write wrapper: {}", e)
                     })?;
@@ -423,12 +956,15 @@ impl ServiceManager for SystemdManager {
                 }
             }
             dlog!("systemd", "wrapper tmp -> final rename");
-            std::fs::rename(&tmp, &self.paths.wrapper_script)
-                .map_err(|e| {
+            std::fs::rename(&tmp, &self.paths.wrapper_script).map_err(|e| {
                     dlog!("systemd", "wrapper rename failed: {}", e);
                     format!("Cannot finalize wrapper: {}", e)
                 })?;
-            dlog!("systemd", "wrapper ready at {}", self.paths.wrapper_script.display());
+            dlog!(
+                "systemd",
+                "wrapper ready at {}",
+                self.paths.wrapper_script.display()
+            );
         }
         // Fallback path for non-Unix targets — systemd manager isn't actually
         // selected on these platforms, but the module still has to compile.
@@ -443,7 +979,11 @@ impl ServiceManager for SystemdManager {
 
         let service = self.generate_service();
         dlog!("systemd", "service unit generated: {} bytes", service.len());
-        dlog!("systemd", "Writing service file to: {}", self.paths.service_file.display());
+        dlog!(
+            "systemd",
+            "Writing service file to: {}",
+            self.paths.service_file.display()
+        );
         #[cfg(unix)]
         {
             use std::io::Write;
@@ -465,8 +1005,7 @@ impl ServiceManager for SystemdManager {
                         format!("Cannot create service temp: {}", e)
                     })?;
                 dlog!("systemd", "service tmp opened (mode 0o600)");
-                file.write_all(service.as_bytes())
-                    .map_err(|e| {
+                file.write_all(service.as_bytes()).map_err(|e| {
                         dlog!("systemd", "service tmp write_all failed: {}", e);
                         format!("Cannot write service file: {}", e)
                     })?;
@@ -477,12 +1016,15 @@ impl ServiceManager for SystemdManager {
                 }
             }
             dlog!("systemd", "service tmp -> final rename");
-            std::fs::rename(&tmp, &self.paths.service_file)
-                .map_err(|e| {
+            std::fs::rename(&tmp, &self.paths.service_file).map_err(|e| {
                     dlog!("systemd", "service rename failed: {}", e);
                     format!("Cannot finalize service file: {}", e)
                 })?;
-            dlog!("systemd", "service file ready at {}", self.paths.service_file.display());
+            dlog!(
+                "systemd",
+                "service file ready at {}",
+                self.paths.service_file.display()
+            );
         }
         #[cfg(not(unix))]
         {
@@ -518,7 +1060,11 @@ impl ServiceManager for SystemdManager {
 
         // Truncate error log before starting so we only capture fresh errors
         let error_log_path = self.paths.log_dir.join("cokacdir.error.log");
-        dlog!("systemd", "Truncating error log: {}", error_log_path.display());
+        dlog!(
+            "systemd",
+            "Truncating error log: {}",
+            error_log_path.display()
+        );
         let _ = std::fs::File::create(&error_log_path);
 
         dlog!("systemd", "Restarting service...");
@@ -534,17 +1080,22 @@ impl ServiceManager for SystemdManager {
             ));
         }
 
-        if let Some(user) = std::env::var("USER").ok() {
+        if let Ok(user) = std::env::var("USER") {
             dlog!("systemd", "Enabling linger for user: {}", user);
             match Command::new("loginctl")
                 .args(["enable-linger", &user])
                 .output()
             {
-                Ok(out) => crate::core::debug::log_output("systemd", "loginctl enable-linger", &out),
+                Ok(out) => {
+                    crate::core::debug::log_output("systemd", "loginctl enable-linger", &out)
+                }
                 Err(e) => dlog!("systemd", "loginctl enable-linger exec failed: {}", e),
             }
         } else {
-            dlog!("systemd", "USER env var not set; skipping loginctl enable-linger");
+            dlog!(
+                "systemd",
+                "USER env var not set; skipping loginctl enable-linger"
+            );
         }
 
         // Check if service actually stays running
@@ -556,28 +1107,49 @@ impl ServiceManager for SystemdManager {
         if status != ServiceStatus::Running {
             // Lossy decode so non-UTF8 bytes in the error log don't wipe out
             // the diagnostic message shown to the user.
-            dlog!("systemd", "Reading error log for diagnostics: {}", error_log_path.display());
+            dlog!(
+                "systemd",
+                "Reading error log for diagnostics: {}",
+                error_log_path.display()
+            );
             let err_bytes = std::fs::read(&error_log_path).unwrap_or_else(|e| {
                 dlog!("systemd", "error log read failed: {}", e);
                 Vec::new()
             });
             dlog!("systemd", "error log size: {}B", err_bytes.len());
             let err_output = String::from_utf8_lossy(&err_bytes);
-            let tail: String = err_output.lines().rev().take(10)
-                .collect::<Vec<_>>().into_iter().rev()
-                .collect::<Vec<_>>().join("\n");
-            dlog!("systemd", "Service not running after restart. Error log tail:\n{}", tail.trim());
+            let tail: String = err_output
+                .lines()
+                .rev()
+                .take(10)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            dlog!(
+                "systemd",
+                "Service not running after restart. Error log tail:\n{}",
+                tail.trim()
+            );
             // Also capture systemd's own view of the failed unit for root cause.
             match Self::user_systemctl_cmd(["status", SERVICE_NAME, "--no-pager", "--lines=30"])
                 .output()
             {
-                Ok(out) => crate::core::debug::log_output("systemd", "systemctl --user status cokacdir (post-fail)", &out),
+                Ok(out) => crate::core::debug::log_output(
+                    "systemd",
+                    "systemctl --user status cokacdir (post-fail)",
+                    &out,
+                ),
                 Err(e) => dlog!("systemd", "post-fail status query exec failed: {}", e),
             }
-            match Self::user_journalctl_cmd(["-u", SERVICE_NAME, "-n", "30", "--no-pager"])
-                .output()
+            match Self::user_journalctl_cmd(["-u", SERVICE_NAME, "-n", "30", "--no-pager"]).output()
             {
-                Ok(out) => crate::core::debug::log_output("systemd", "journalctl --user -u cokacdir -n 30 (post-fail)", &out),
+                Ok(out) => crate::core::debug::log_output(
+                    "systemd",
+                    "journalctl --user -u cokacdir -n 30 (post-fail)",
+                    &out,
+                ),
                 Err(e) => dlog!("systemd", "post-fail journalctl exec failed: {}", e),
             }
             if !tail.trim().is_empty() {
@@ -592,6 +1164,10 @@ impl ServiceManager for SystemdManager {
 
     fn stop(&self) -> Result<(), String> {
         dlog!("systemd", "stop() called");
+        if let Some(cause) = Self::service_manager_unavailable_cause() {
+            return self.direct_stop(&cause);
+        }
+
         let mut service_err: Option<String> = None;
         // Only attempt `systemctl stop` when the unit file exists. This avoids
         // depending on locale-specific stderr ("not loaded"/"not found") text
@@ -619,19 +1195,26 @@ impl ServiceManager for SystemdManager {
                 }
             }
         } else {
-            dlog!("systemd", "stop(): service file absent, skipping systemctl stop");
+            dlog!(
+                "systemd",
+                "stop(): service file absent, skipping systemctl stop"
+            );
         }
 
         // Always kill externally running cokacdir processes regardless of service stop result
-        dlog!("systemd", "stop(): killing external {} processes via pkill...", SERVICE_NAME);
+        dlog!(
+            "systemd",
+            "stop(): killing external {} processes via pkill...",
+            SERVICE_NAME
+        );
         match Command::new("pkill").arg(SERVICE_NAME).output() {
             Ok(out) => {
-                crate::core::debug::log_output(
+                crate::core::debug::log_output("systemd", &format!("pkill {}", SERVICE_NAME), &out);
+                dlog!(
                     "systemd",
-                    &format!("pkill {}", SERVICE_NAME),
-                    &out,
+                    "stop(): pkill exit={} (0=killed, 1=none found)",
+                    out.status.code().unwrap_or(-1)
                 );
-                dlog!("systemd", "stop(): pkill exit={} (0=killed, 1=none found)", out.status.code().unwrap_or(-1));
             }
             Err(e) => {
                 dlog!("systemd", "stop(): pkill failed: {}", e);
@@ -646,32 +1229,58 @@ impl ServiceManager for SystemdManager {
 
     fn remove(&self) -> Result<(), String> {
         dlog!("systemd", "remove() called");
+        if let Some(cause) = Self::service_manager_unavailable_cause() {
+            return Err(Self::service_manager_unavailable_long(&cause));
+        }
+
         let _ = self.stop();
         dlog!("systemd", "remove(): disabling service");
         match Self::user_systemctl_cmd(["disable", SERVICE_NAME]).output() {
-            Ok(out) => crate::core::debug::log_output("systemd", "systemctl --user disable cokacdir", &out),
+            Ok(out) => {
+                crate::core::debug::log_output("systemd", "systemctl --user disable cokacdir", &out)
+            }
             Err(e) => dlog!("systemd", "remove(): disable exec failed: {}", e),
         }
         if self.paths.service_file.exists() {
-            dlog!("systemd", "Removing service file: {}", self.paths.service_file.display());
+            dlog!(
+                "systemd",
+                "Removing service file: {}",
+                self.paths.service_file.display()
+            );
             std::fs::remove_file(&self.paths.service_file)
                 .map_err(|e| format!("Cannot remove service file: {}", e))?;
             dlog!("systemd", "Removed service file");
         } else {
-            dlog!("systemd", "Service file already absent: {}", self.paths.service_file.display());
+            dlog!(
+                "systemd",
+                "Service file already absent: {}",
+                self.paths.service_file.display()
+            );
         }
         if self.paths.wrapper_script.exists() {
-            dlog!("systemd", "Removing wrapper: {}", self.paths.wrapper_script.display());
+            dlog!(
+                "systemd",
+                "Removing wrapper: {}",
+                self.paths.wrapper_script.display()
+            );
             match std::fs::remove_file(&self.paths.wrapper_script) {
                 Ok(_) => dlog!("systemd", "Removed wrapper script"),
                 Err(e) => dlog!("systemd", "Failed to remove wrapper: {}", e),
             }
         } else {
-            dlog!("systemd", "Wrapper script already absent: {}", self.paths.wrapper_script.display());
+            dlog!(
+                "systemd",
+                "Wrapper script already absent: {}",
+                self.paths.wrapper_script.display()
+            );
         }
         dlog!("systemd", "remove(): running daemon-reload");
         match Self::user_systemctl_cmd(["daemon-reload"]).output() {
-            Ok(out) => crate::core::debug::log_output("systemd", "systemctl --user daemon-reload (remove)", &out),
+            Ok(out) => crate::core::debug::log_output(
+                "systemd",
+                "systemctl --user daemon-reload (remove)",
+                &out,
+            ),
             Err(e) => dlog!("systemd", "remove(): daemon-reload exec failed: {}", e),
         }
         dlog!("systemd", "remove() complete");
@@ -681,6 +1290,21 @@ impl ServiceManager for SystemdManager {
     fn status(&self) -> ServiceStatus {
         // Compute outcome silently, then log only on state transitions so the
         // 5-second poll doesn't fill the debug log with identical lines.
+        if let Some(cause) = Self::service_manager_unavailable_cause() {
+            let result = self.direct_status(&cause);
+            let key = format!("direct_mode:{:?}", result);
+            if Self::status_key_changed(&key) {
+                crate::core::debug::log(
+                    "systemd",
+                    &format!(
+                        "status(): service manager unavailable: {} -> {:?}",
+                        cause, result
+                    ),
+                );
+            }
+            return result;
+        }
+
         // Same precheck as start(): if the user D-Bus socket is missing,
         // every `systemctl --user` call below would just return the cryptic
         // "Failed to connect to bus: No medium found". Surface a clearer
@@ -690,12 +1314,9 @@ impl ServiceManager for SystemdManager {
             if !bus_path.exists() {
                 Self::log_status_transition(
                     "bus_missing",
-                    &format!(
-                        "status(): user bus socket missing ({}) -> Unknown",
-                        bus_path.display()
-                    ),
+                    &format!("status(): user bus socket missing ({})", bus_path.display()),
                 );
-                return ServiceStatus::Unknown(Self::user_bus_missing_short());
+                return self.direct_status("user systemd bus unavailable");
             }
         }
         if !self.paths.service_file.exists() {
@@ -709,10 +1330,14 @@ impl ServiceManager for SystemdManager {
         match output {
             Ok(out) => {
                 let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                let result = match state.as_str() {
+                let result = if Self::output_mentions_user_bus_failure(&out) {
+                    self.direct_status("user systemd bus unavailable")
+                } else {
+                    match state.as_str() {
                     "active" => ServiceStatus::Running,
                     "inactive" | "failed" => ServiceStatus::Stopped,
                     _ => ServiceStatus::Unknown(Self::output_detail(&out)),
+                    }
                 };
                 let key = format!("{:?}", result);
                 if Self::status_key_changed(&key) {
@@ -721,12 +1346,7 @@ impl ServiceManager for SystemdManager {
                         "systemctl --user is-active cokacdir",
                         &out,
                     );
-                    dlog!(
-                        "systemd",
-                        "status(): is-active='{}' -> {:?}",
-                        state,
-                        result
-                    );
+                    dlog!("systemd", "status(): is-active='{}' -> {:?}", state, result);
                 }
                 result
             }
@@ -735,34 +1355,89 @@ impl ServiceManager for SystemdManager {
                     "exec_failed",
                     &format!("status() query failed: {}", e),
                 );
-                ServiceStatus::Unknown("Cannot query systemctl".into())
+                self.direct_status(&Self::systemctl_exec_error_detail(&e))
             }
         }
     }
 
     fn is_any_running(&self) -> bool {
-        dlog!("systemd", "is_any_running(): checking pgrep {}...", SERVICE_NAME);
-        match Command::new("pgrep").arg(SERVICE_NAME).output() {
-            Ok(output) => {
-                crate::core::debug::log_output(
-                    "systemd",
-                    &format!("pgrep {}", SERVICE_NAME),
-                    &output,
-                );
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let pids = stdout.trim();
-                let found = output.status.success();
-                dlog!("systemd", "is_any_running(): pgrep exit={}, pids='{}', found={}", output.status.code().unwrap_or(-1), pids, found);
-                found
-            }
-            Err(e) => {
-                dlog!("systemd", "is_any_running(): pgrep failed: {}", e);
-                false
-            }
-        }
+        Self::cokacdir_process_running(true)
     }
 
     fn log_path(&self) -> Option<PathBuf> {
         Some(self.paths.log_file.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn direct_record(binary_path: &str) -> DirectProcessRecord {
+        DirectProcessRecord {
+            schema_version: direct_record_schema_version(),
+            pid: 1234,
+            process_group_id: Some(1234),
+            binary_path: binary_path.to_string(),
+            token_count: 2,
+            started_at_epoch_s: 1,
+        }
+    }
+
+    #[test]
+    fn direct_record_identity_requires_binary_and_ccserver_args() {
+        let record = direct_record("/opt/bin/cokacdir");
+        let args = vec![
+            "/opt/bin/cokacdir".to_string(),
+            "--ccserver".to_string(),
+            "--".to_string(),
+            "token-a".to_string(),
+        ];
+
+        assert!(SystemdManager::args_match_direct_record(&args, &record));
+    }
+
+    #[test]
+    fn direct_record_identity_rejects_reused_pid_binary_mismatch() {
+        let record = direct_record("/opt/bin/cokacdir");
+        let args = vec![
+            "/tmp/other/cokacdir".to_string(),
+            "--ccserver".to_string(),
+            "--".to_string(),
+        ];
+
+        assert!(!SystemdManager::args_match_direct_record(&args, &record));
+    }
+
+    #[test]
+    fn direct_record_identity_accepts_interpreter_script_cmdline() {
+        let record = direct_record("/tmp/bin/cokacdir");
+        let args = vec![
+            "/usr/bin/bash".to_string(),
+            "/tmp/bin/cokacdir".to_string(),
+            "--ccserver".to_string(),
+            "--".to_string(),
+            "token-a".to_string(),
+        ];
+
+        assert!(SystemdManager::args_match_direct_record(&args, &record));
+    }
+
+    #[test]
+    fn legacy_direct_record_requires_cokacdir_ccserver_shape() {
+        let mut record = direct_record("");
+        record.process_group_id = None;
+        let args = vec![
+            "/usr/local/bin/cokacdir".to_string(),
+            "--ccserver".to_string(),
+            "--".to_string(),
+        ];
+        let wrong_args = vec!["/usr/local/bin/cokacdir".to_string(), "--help".to_string()];
+
+        assert!(SystemdManager::args_match_direct_record(&args, &record));
+        assert!(!SystemdManager::args_match_direct_record(
+            &wrong_args,
+            &record
+        ));
     }
 }

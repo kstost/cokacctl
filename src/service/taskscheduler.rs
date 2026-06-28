@@ -24,18 +24,80 @@ impl TaskSchedulerManager {
             .replace('|', "^|")
             .replace('<', "^<")
             .replace('>', "^>")
-            .replace('%', "%%");
+            .replace('%', "%%")
+            .replace('"', "^\"");
         format!("\"{}\"", escaped)
     }
 
     fn generate_wrapper(binary_path: &Path, tokens: &[String], paths: &ServicePaths) -> String {
         let args: Vec<String> = tokens.iter().map(|t| Self::escape_bat_arg(t)).collect();
         format!(
-            "@echo off\r\n{exe} --ccserver -- {args} >> \"{log}\" 2>> \"{elog}\"\r\n",
+            "@echo off\r\n{exe} --ccserver -- {args} >> {log} 2>> {elog}\r\n",
             exe = Self::escape_bat_arg(&binary_path.to_string_lossy()),
             args = args.join(" "),
-            log = paths.log_file.to_string_lossy(),
-            elog = paths.error_log_file.to_string_lossy(),
+            log = Self::escape_bat_arg(&paths.log_file.to_string_lossy()),
+            elog = Self::escape_bat_arg(&paths.error_log_file.to_string_lossy()),
+        )
+    }
+
+    fn redacted_wrapper_preview(
+        binary_path: &Path,
+        token_count: usize,
+        paths: &ServicePaths,
+    ) -> String {
+        let redacted_tokens = (0..token_count)
+            .map(|_| "[redacted-token]".to_string())
+            .collect::<Vec<_>>();
+        Self::generate_wrapper(binary_path, &redacted_tokens, paths)
+    }
+
+    fn escape_ps_single(s: &str) -> String {
+        s.replace('\'', "''")
+    }
+
+    fn generate_registration_script(wrapper_path: &Path, working_dir: &Path) -> String {
+        let wrapper = Self::escape_ps_single(&wrapper_path.to_string_lossy());
+        let wd = Self::escape_ps_single(&working_dir.to_string_lossy());
+        format!(
+            "$ErrorActionPreference = 'Stop'\n\
+             try {{\n\
+                 $userId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name\n\
+                 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()\n\
+                 $principalCheck = New-Object System.Security.Principal.WindowsPrincipal -ArgumentList $identity\n\
+                 $isAdmin = $principalCheck.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)\n\
+                 $runLevel = if ($isAdmin) {{ 'Highest' }} else {{ 'Limited' }}\n\
+                 $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/d /c \"{wrapper}\"' -WorkingDirectory '{wd}'\n\
+                 $trigger = New-ScheduledTaskTrigger -AtLogon\n\
+                 $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType S4U -RunLevel $runLevel\n\
+                 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew\n\
+                 $task = Register-ScheduledTask -TaskName '{name}' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force\n\
+                 Write-Output \"registered: true\"\n\
+                 Write-Output \"principal-user: $userId\"\n\
+                 Write-Output \"principal-runlevel: $runLevel\"\n\
+                 Write-Output \"state-after-register: $($task.State)\"\n\
+             }} catch {{\n\
+                 Write-Output \"registered: false\"\n\
+                 Write-Error ($_ | Out-String)\n\
+                 exit 1\n\
+             }}",
+            wrapper = wrapper,
+            wd = wd,
+            name = TASK_NAME,
+        )
+    }
+
+    fn generate_start_script() -> String {
+        format!(
+            "$ErrorActionPreference = 'Stop'\n\
+             try {{\n\
+                 Start-ScheduledTask -TaskName '{name}'\n\
+                 Write-Output \"started: true\"\n\
+             }} catch {{\n\
+                 Write-Output \"started: false\"\n\
+                 Write-Error ($_ | Out-String)\n\
+                 exit 1\n\
+             }}",
+            name = TASK_NAME,
         )
     }
 
@@ -121,13 +183,17 @@ impl TaskSchedulerManager {
     /// Create a Command with CREATE_NO_WINDOW flag on Windows
     /// to prevent console windows from flashing during TUI operation.
     fn cmd<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
-        let mut cmd = Command::new(program);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
+            let mut cmd = Command::new(program);
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            cmd
         }
-        cmd
+        #[cfg(not(windows))]
+        {
+            Command::new(program)
+        }
     }
 
     fn powershell(script: &str) -> Result<std::process::Output, String> {
@@ -182,7 +248,11 @@ impl TaskSchedulerManager {
     fn clear_legacy_pid_file(&self) {
         let legacy_pid = self.paths.log_dir.join("cokacdir.pid");
         if legacy_pid.exists() {
-            dlog!("taskscheduler", "Removing legacy PID file: {}", legacy_pid.display());
+            dlog!(
+                "taskscheduler",
+                "Removing legacy PID file: {}",
+                legacy_pid.display()
+            );
             let _ = std::fs::remove_file(legacy_pid);
         }
     }
@@ -273,11 +343,7 @@ impl TaskSchedulerManager {
         s
     }
 
-    fn run_ps_logged(
-        &self,
-        label: &str,
-        script: &str,
-    ) -> Result<std::process::Output, String> {
+    fn run_ps_logged(&self, label: &str, script: &str) -> Result<std::process::Output, String> {
         let t0 = std::time::Instant::now();
         let result = Self::powershell(script);
         let elapsed = t0.elapsed();
@@ -287,10 +353,8 @@ impl TaskSchedulerManager {
                 self.ops_log_block(label, &block);
             }
             Err(e) => {
-                let script_lines: String = script
-                    .lines()
-                    .map(|l| format!("    | {}\n", l))
-                    .collect();
+                let script_lines: String =
+                    script.lines().map(|l| format!("    | {}\n", l)).collect();
                 let body = format!(
                     "ps-script:\n{}invocation-error: {}\nduration: {} ms\n",
                     script_lines,
@@ -409,10 +473,18 @@ impl TaskSchedulerManager {
         let output = Self::powershell(&script)?;
         let stdout = decode_output(&output.stdout);
         let stderr = decode_output(&output.stderr);
-        dlog!("taskscheduler", "query_task_state exit={}, stdout='{}', stderr='{}'",
-            output.status, stdout.trim(), stderr.trim());
+        dlog!(
+            "taskscheduler",
+            "query_task_state exit={}, stdout='{}', stderr='{}'",
+            output.status,
+            stdout.trim(),
+            stderr.trim()
+        );
         if !output.status.success() {
-            return Err(format!("Cannot query Task Scheduler state: {}", stderr.trim()));
+            return Err(format!(
+                "Cannot query Task Scheduler state: {}",
+                stderr.trim()
+            ));
         }
         let state = stdout
             .lines()
@@ -442,7 +514,11 @@ impl TaskSchedulerManager {
                     "stop_task_if_present: task present, state={}, nothing to stop",
                     state
                 ));
-                dlog!("taskscheduler", "stop_task_if_present: task present but state={}, nothing to stop", state);
+                dlog!(
+                    "taskscheduler",
+                    "stop_task_if_present: task present but state={}, nothing to stop",
+                    state
+                );
                 return Ok(());
             }
             Some(_) => {}
@@ -450,7 +526,12 @@ impl TaskSchedulerManager {
         let script = format!("Stop-ScheduledTask -TaskName '{}'", TASK_NAME);
         let output = self.run_ps_logged("stop_task_if_present: Stop-ScheduledTask", &script)?;
         let stderr = decode_output(&output.stderr);
-        dlog!("taskscheduler", "stop_task_if_present exit={}, stderr='{}'", output.status, stderr.trim());
+        dlog!(
+            "taskscheduler",
+            "stop_task_if_present exit={}, stderr='{}'",
+            output.status,
+            stderr.trim()
+        );
         if !output.status.success() {
             let err = format!("Task stop failed: {}", stderr.trim());
             self.ops_log(&format!("stop_task_if_present: ERROR {}", err));
@@ -492,12 +573,47 @@ impl TaskSchedulerManager {
                 stderr.trim().replace('\n', "\n    | "),
             ),
         );
-        dlog!("taskscheduler", "delete_task_if_present exit={}, stdout='{}', stderr='{}'",
-            output.status, stdout.trim(), stderr.trim());
+        dlog!(
+            "taskscheduler",
+            "delete_task_if_present exit={}, stdout='{}', stderr='{}'",
+            output.status,
+            stdout.trim(),
+            stderr.trim()
+        );
         if !output.status.success() {
             return Err(format!("Task deletion failed: {}", stderr.trim()));
         }
         Ok(())
+    }
+
+    fn remove_wrapper_file(&self, context: &str) {
+        self.ops_log(&format!(
+            "{}: deleting wrapper {}",
+            context,
+            self.paths.wrapper_script.display()
+        ));
+        match std::fs::remove_file(&self.paths.wrapper_script) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => self.ops_log(&format!("{}: wrapper removal failed: {}", context, e)),
+        }
+    }
+
+    fn cleanup_failed_start(&self, reason: &str, kill_processes: bool) {
+        self.ops_log(&format!("cleanup_failed_start: {}", reason));
+        if kill_processes {
+            self.kill_cokacdir_processes();
+        }
+        if let Err(e) = self.delete_task_if_present() {
+            self.ops_log(&format!("cleanup_failed_start: task delete failed: {}", e));
+        }
+        if let Err(e) = self.remove_state_file() {
+            self.ops_log(&format!(
+                "cleanup_failed_start: state file removal failed: {}",
+                e
+            ));
+        }
+        self.remove_wrapper_file("cleanup_failed_start");
     }
 
     fn read_error_log_tail(&self, lines: usize) -> String {
@@ -523,7 +639,9 @@ impl TaskSchedulerManager {
             "Scheduler started",
             "No pending updates",
         ];
-        success_markers.iter().any(|marker| log_tail.contains(marker))
+        success_markers
+            .iter()
+            .any(|marker| log_tail.contains(marker))
     }
 
     fn benign_error_log_only(&self, err_tail: &str) -> bool {
@@ -532,10 +650,7 @@ impl TaskSchedulerManager {
             .map(str::trim)
             .filter(|line| !line.is_empty())
             .collect();
-        !lines.is_empty()
-            && lines.iter().all(|line| {
-                line.starts_with("[ccserver]")
-            })
+        !lines.is_empty() && lines.iter().all(|line| line.starts_with("[ccserver]"))
     }
 
     fn append_diagnostic_error(&self, message: &str) {
@@ -579,8 +694,7 @@ impl TaskSchedulerManager {
             .join("\n")
     }
 
-    fn wait_for_running(&self) -> Result<(), String> {
-        let start_log_offset = self.current_log_size();
+    fn wait_for_running(&self, start_log_offset: u64) -> Result<(), String> {
         let t_begin = std::time::Instant::now();
         let deadline = t_begin + std::time::Duration::from_secs(4);
         let mut saw_running = false;
@@ -627,30 +741,23 @@ impl TaskSchedulerManager {
                     );
                     let err_tail = self.read_error_log_tail(10);
                     let log_tail = self.read_log_tail_since(start_log_offset, 80);
+                    let process_alive = Self::is_cokacdir_running();
                     self.ops_log_block("service log tail (since begin)", log_tail.trim_end());
                     self.ops_log_block("error log tail", err_tail.trim_end());
-                    if self.startup_log_indicates_success(&log_tail)
-                        && Self::is_cokacdir_running()
-                    {
-                        self.ops_log(
-                            "branch: Running->Ready, log indicates success and process alive -> OK",
-                        );
+                    self.ops_log(&format!(
+                        "Running->Ready evaluation: process_alive={}, log_has_success_markers={}",
+                        process_alive,
+                        self.startup_log_indicates_success(&log_tail)
+                    ));
+                    if process_alive {
+                        self.ops_log("branch: Running->Ready, live process present -> OK");
                         self.append_diagnostic_error(
-                            "Startup verification observed task return to Ready after Running, but service log shows successful startup markers. Treating as success.",
+                            "Startup verification observed task return to Ready after Running, but a live cokacdir process is present. Treating startup as success.",
                         );
                         return Ok(());
                     }
                     if !err_tail.trim().is_empty() {
                         if self.benign_error_log_only(&err_tail) {
-                            if Self::is_cokacdir_running() {
-                                self.ops_log(
-                                    "branch: Running->Ready, benign stderr, process alive -> OK",
-                                );
-                                self.append_diagnostic_error(
-                                    "Startup verification found only benign [ccserver] stderr output and a live process. Treating startup as success.",
-                                );
-                                return Ok(());
-                            }
                             self.ops_log(
                                 "branch: Running->Ready, benign stderr, no process -> FAIL",
                             );
@@ -659,9 +766,7 @@ impl TaskSchedulerManager {
                             );
                             return Err("cokacdir exited immediately after launch.".into());
                         }
-                        self.ops_log(
-                            "branch: Running->Ready, real error output present -> FAIL",
-                        );
+                        self.ops_log("branch: Running->Ready, real error output present -> FAIL");
                         self.append_diagnostic_error(&format!(
                             "Startup verification failed after task returned to Ready. Recent error log:\n{}",
                             err_tail
@@ -708,17 +813,15 @@ impl TaskSchedulerManager {
             );
             return Ok(());
         }
+        if process_alive {
+            self.ops_log("branch (timeout): process alive -> OK");
+            self.append_diagnostic_error(
+                "Startup verification timed out before confirming the scheduled task state, but a live cokacdir process is present. Treating startup as success.",
+            );
+            return Ok(());
+        }
         if !err_tail.trim().is_empty() {
             if self.benign_error_log_only(&err_tail) {
-                if process_alive {
-                    self.ops_log(
-                        "branch (timeout): benign stderr + process alive -> OK",
-                    );
-                    self.append_diagnostic_error(
-                        "Startup verification timed out with only benign [ccserver] stderr output, but a live process was found. Treating startup as success.",
-                    );
-                    return Ok(());
-                }
                 self.ops_log("branch (timeout): benign stderr + no process -> FAIL");
                 self.append_diagnostic_error(
                     "Startup verification timed out with only benign [ccserver] stderr output, but no live cokacdir process was found.",
@@ -733,23 +836,11 @@ impl TaskSchedulerManager {
             return Err(err_tail);
         }
         if saw_running {
-            if process_alive {
-                self.ops_log(
-                    "branch (timeout): saw Running earlier, process alive -> OK",
-                );
-                self.append_diagnostic_error(
-                    "Startup verification saw the scheduled task enter Running and a live process is present. Treating as success.",
-                );
-                Ok(())
-            } else {
-                self.ops_log(
-                    "branch (timeout): saw Running earlier, but no process now -> FAIL",
-                );
-                self.append_diagnostic_error(
-                    "Startup verification saw the scheduled task enter Running, but no live cokacdir process was found afterward.",
-                );
-                Err("cokacdir exited immediately after launch.".into())
-            }
+            self.ops_log("branch (timeout): saw Running earlier, but no process now -> FAIL");
+            self.append_diagnostic_error(
+                "Startup verification saw the scheduled task enter Running, but no live cokacdir process was found afterward.",
+            );
+            Err("cokacdir exited immediately after launch.".into())
         } else {
             self.ops_log(
                 "branch (timeout): never saw Running, no error log -> FAIL (root cause unclear — see task snapshot above for LastTaskResult)",
@@ -774,7 +865,11 @@ impl TaskSchedulerManager {
                 let found = !matching.is_empty();
                 if found {
                     for m in &matching {
-                        dlog!("taskscheduler", "is_cokacdir_running: matched process: {}", m);
+                        dlog!(
+                            "taskscheduler",
+                            "is_cokacdir_running: matched process: {}",
+                            m
+                        );
                     }
                 }
                 dlog!(
@@ -786,7 +881,11 @@ impl TaskSchedulerManager {
                 found
             }
             Err(e) => {
-                dlog!("taskscheduler", "is_cokacdir_running: tasklist failed: {}", e);
+                dlog!(
+                    "taskscheduler",
+                    "is_cokacdir_running: tasklist failed: {}",
+                    e
+                );
                 false
             }
         }
@@ -843,7 +942,11 @@ impl ServiceManager for TaskSchedulerManager {
 
         dlog!("taskscheduler", "========== start() BEGIN ==========");
         dlog!("taskscheduler", "binary_path: '{}'", binary_path.display());
-        dlog!("taskscheduler", "binary_path exists: {}", binary_path.exists());
+        dlog!(
+            "taskscheduler",
+            "binary_path exists: {}",
+            binary_path.exists()
+        );
         dlog!("taskscheduler", "tokens count: {}", tokens.len());
 
         // Remove existing task first
@@ -852,6 +955,15 @@ impl ServiceManager for TaskSchedulerManager {
         let remove_result = self.remove();
         self.ops_log(&format!("[step 1/4] remove() result: {:?}", remove_result));
         dlog!("taskscheduler", "remove result: {:?}", remove_result);
+        if Self::is_cokacdir_running() {
+            let err =
+                "Cannot start safely: an existing cokacdir process is still running after cleanup."
+                    .to_string();
+            self.ops_log(&format!("ERROR at step 1/4: {}", err));
+            self.ops_log_block("processes after failed pre-clean", &self.snapshot_process());
+            self.ops_log_section_end("start", "FAIL: existing process still running");
+            return Err(err);
+        }
 
         // Prepare log directory
         let home = match dirs::home_dir() {
@@ -887,56 +999,40 @@ impl ServiceManager for TaskSchedulerManager {
         let wrapper = Self::generate_wrapper(binary_path, tokens, &self.paths);
         let wrapper_bytes = Self::encode_for_bat(&wrapper);
         let oem_cp = Self::oem_code_page();
-        dlog!("taskscheduler", "Wrapper path: {}", self.paths.wrapper_script.display());
+        dlog!(
+            "taskscheduler",
+            "Wrapper path: {}",
+            self.paths.wrapper_script.display()
+        );
         if let Err(e) = std::fs::write(&self.paths.wrapper_script, &wrapper_bytes) {
             let err = format!("Cannot write wrapper script: {}", e);
             self.ops_log(&format!("ERROR at step 2/4: {}", err));
+            self.remove_wrapper_file("wrapper write failure");
             self.ops_log_section_end("start", "FAIL: wrapper write");
             return Err(err);
         }
         self.ops_log_block(
             "[step 2/4] wrapper script written",
             &format!(
-                "path: {}\nutf8_bytes: {}\noem_encoded_bytes: {}\noem_code_page: {}\ncontent (utf-8 view):\n{}",
+                "path: {}\nutf8_bytes: {}\noem_encoded_bytes: {}\noem_code_page: {}\ncontent (redacted):\n{}",
                 self.paths.wrapper_script.display(),
                 wrapper.len(),
                 wrapper_bytes.len(),
                 oem_cp,
-                wrapper.trim_end()
+                Self::redacted_wrapper_preview(binary_path, tokens.len(), &self.paths).trim_end()
             ),
         );
 
         // Register scheduled task to run the wrapper script
-        let escape_ps_single = |s: &str| -> String {
-            s.replace('\'', "''")
-        };
-
         dlog!("taskscheduler", "[step 3/4] Registering scheduled task...");
-        let wrapper_path = self.paths.wrapper_script.to_string_lossy();
-        let script = format!(
-            "$ErrorActionPreference = 'Stop'\n\
-             try {{\n\
-                 $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c \"{wrapper}\"' -WorkingDirectory '{wd}'\n\
-                 $trigger = New-ScheduledTaskTrigger -AtLogon\n\
-                 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Highest\n\
-                 $task = Register-ScheduledTask -TaskName '{name}' -Action $action -Trigger $trigger -Principal $principal -Force\n\
-                 Write-Output \"registered: true\"\n\
-                 Write-Output \"state-after-register: $($task.State)\"\n\
-             }} catch {{\n\
-                 Write-Output \"registered: false\"\n\
-                 Write-Error ($_ | Out-String)\n\
-                 exit 1\n\
-             }}",
-            wrapper = escape_ps_single(&wrapper_path),
-            wd = escape_ps_single(&home.to_string_lossy()),
-            name = TASK_NAME,
-        );
+        let script = Self::generate_registration_script(&self.paths.wrapper_script, &home);
 
         let output = match self.run_ps_logged("[step 3/4] Register-ScheduledTask", &script) {
             Ok(o) => o,
             Err(e) => {
                 self.ops_log(&format!("ERROR at step 3/4 invocation: {}", e));
                 self.ops_log_section_end("start", &format!("FAIL: Register invocation: {}", e));
+                self.cleanup_failed_start("Register-ScheduledTask invocation error", false);
                 return Err(e);
             }
         };
@@ -945,9 +1041,16 @@ impl ServiceManager for TaskSchedulerManager {
             let stderr = decode_output(&output.stderr);
             let err = format!("Task creation failed: {}", stderr.trim());
             self.ops_log(&format!("ERROR at step 3/4: {}", err));
-            self.ops_log_block("task snapshot after Register failure", &self.snapshot_task());
+            self.ops_log_block(
+                "task snapshot after Register failure",
+                &self.snapshot_task(),
+            );
             self.ops_log_section_end("start", &format!("FAIL: {}", err));
-            dlog!("taskscheduler", "========== start() FAILED at Register ==========");
+            dlog!(
+                "taskscheduler",
+                "========== start() FAILED at Register =========="
+            );
+            self.cleanup_failed_start("Register-ScheduledTask returned non-success", false);
             return Err(err);
         }
 
@@ -961,12 +1064,12 @@ impl ServiceManager for TaskSchedulerManager {
                 ));
             }
             Ok(None) => {
-                let err =
-                    "Task creation reported success, but Get-ScheduledTask returns no task"
+                let err = "Task creation reported success, but Get-ScheduledTask returns no task"
                         .to_string();
                 self.ops_log(&format!("ERROR at step 3/4 verify: {}", err));
                 self.ops_log_block("task snapshot after verify miss", &self.snapshot_task());
                 self.ops_log_section_end("start", "FAIL: post-register verify (task missing)");
+                self.cleanup_failed_start("post-register verification missed task", false);
                 return Err(err);
             }
             Err(e) => {
@@ -976,37 +1079,37 @@ impl ServiceManager for TaskSchedulerManager {
                 ));
             }
         }
-        self.ops_log_block("[step 3/4] task snapshot after register", &self.snapshot_task());
+        self.ops_log_block(
+            "[step 3/4] task snapshot after register",
+            &self.snapshot_task(),
+        );
 
         let state = self.service_state(binary_path, tokens);
         if let Err(e) = self.write_state_file(&state) {
             self.ops_log(&format!("ERROR writing state file: {}", e));
-            let _ = self.delete_task_if_present();
+            self.cleanup_failed_start("state file write failed", false);
             self.ops_log_section_end("start", &format!("FAIL: state file: {}", e));
             return Err(e);
         }
 
         // Start the scheduled task immediately
         dlog!("taskscheduler", "[step 4/4] Starting scheduled task...");
-        let start_script = format!(
-            "$ErrorActionPreference = 'Stop'\n\
-             try {{\n\
-                 Start-ScheduledTask -TaskName '{name}'\n\
-                 Write-Output \"started: true\"\n\
-             }} catch {{\n\
-                 Write-Output \"started: false\"\n\
-                 Write-Error ($_ | Out-String)\n\
-                 exit 1\n\
-             }}",
-            name = TASK_NAME,
-        );
-        let start_output = match self.run_ps_logged("[step 4/4] Start-ScheduledTask", &start_script) {
+        let start_log_offset = self.current_log_size();
+        self.ops_log(&format!(
+            "[step 4/4] log_file_offset_before_start={} bytes",
+            start_log_offset
+        ));
+        let start_script = Self::generate_start_script();
+        let start_output = match self.run_ps_logged("[step 4/4] Start-ScheduledTask", &start_script)
+        {
             Ok(o) => o,
             Err(e) => {
                 self.ops_log(&format!("ERROR at step 4/4 invocation: {}", e));
-                self.ops_log_block("task snapshot after Start invocation error", &self.snapshot_task());
-                let _ = self.delete_task_if_present();
-                let _ = self.remove_state_file();
+                self.ops_log_block(
+                    "task snapshot after Start invocation error",
+                    &self.snapshot_task(),
+                );
+                self.cleanup_failed_start("Start-ScheduledTask invocation error", true);
                 self.ops_log_section_end("start", &format!("FAIL: Start invocation: {}", e));
                 return Err(e);
             }
@@ -1017,9 +1120,11 @@ impl ServiceManager for TaskSchedulerManager {
             let err = format!("Task start failed: {}", start_stderr.trim());
             self.ops_log(&format!("ERROR at step 4/4: {}", err));
             self.ops_log_block("task snapshot after Start failure", &self.snapshot_task());
-            dlog!("taskscheduler", "========== start() FAILED at Start ==========");
-            let _ = self.delete_task_if_present();
-            let _ = self.remove_state_file();
+            dlog!(
+                "taskscheduler",
+                "========== start() FAILED at Start =========="
+            );
+            self.cleanup_failed_start("Start-ScheduledTask returned non-success", true);
             self.ops_log_section_end("start", &format!("FAIL: {}", err));
             return Err(err);
         }
@@ -1029,12 +1134,11 @@ impl ServiceManager for TaskSchedulerManager {
             &self.snapshot_task(),
         );
 
-        if let Err(e) = self.wait_for_running() {
+        if let Err(e) = self.wait_for_running(start_log_offset) {
             self.ops_log(&format!("ERROR at wait_for_running: {}", e));
             self.ops_log_block("final task snapshot", &self.snapshot_task());
             self.ops_log_block("final process snapshot", &self.snapshot_process());
-            let _ = self.delete_task_if_present();
-            let _ = self.remove_state_file();
+            self.cleanup_failed_start("startup verification failed", true);
             self.ops_log_section_end("start", &format!("FAIL: {}", e));
             return Err(e);
         }
@@ -1061,7 +1165,11 @@ impl ServiceManager for TaskSchedulerManager {
 
         if let Err(e) = self.stop_task_if_present() {
             self.ops_log(&format!("stop(): stop_task_if_present failed: {}", e));
-            dlog!("taskscheduler", "stop(): stop_task_if_present failed: {}", e);
+            dlog!(
+                "taskscheduler",
+                "stop(): stop_task_if_present failed: {}",
+                e
+            );
         }
         self.kill_cokacdir_processes();
         self.clear_legacy_pid_file();
@@ -1090,19 +1198,31 @@ impl ServiceManager for TaskSchedulerManager {
         // Stop first
         if let Err(e) = self.stop_task_if_present() {
             self.ops_log(&format!("remove(): stop_task_if_present failed: {}", e));
-            dlog!("taskscheduler", "remove(): stop_task_if_present failed: {}", e);
+            dlog!(
+                "taskscheduler",
+                "remove(): stop_task_if_present failed: {}",
+                e
+            );
         }
         self.kill_cokacdir_processes();
         if let Err(e) = self.delete_task_if_present() {
             self.ops_log(&format!("remove(): delete_task_if_present failed: {}", e));
-            dlog!("taskscheduler", "remove(): delete_task_if_present failed: {}", e);
+            dlog!(
+                "taskscheduler",
+                "remove(): delete_task_if_present failed: {}",
+                e
+            );
         }
         if self.paths.wrapper_script.exists() {
             self.ops_log(&format!(
                 "remove(): deleting wrapper {}",
                 self.paths.wrapper_script.display()
             ));
-            dlog!("taskscheduler", "Removing wrapper: {}", self.paths.wrapper_script.display());
+            dlog!(
+                "taskscheduler",
+                "Removing wrapper: {}",
+                self.paths.wrapper_script.display()
+            );
             if let Err(e) = std::fs::remove_file(&self.paths.wrapper_script) {
                 self.ops_log(&format!("remove(): wrapper removal failed: {}", e));
                 dlog!("taskscheduler", "remove(): wrapper removal failed: {}", e);
@@ -1112,7 +1232,11 @@ impl ServiceManager for TaskSchedulerManager {
         }
         if let Err(e) = self.remove_state_file() {
             self.ops_log(&format!("remove(): state file removal failed: {}", e));
-            dlog!("taskscheduler", "remove(): state file removal failed: {}", e);
+            dlog!(
+                "taskscheduler",
+                "remove(): state file removal failed: {}",
+                e
+            );
         }
         self.clear_legacy_pid_file();
         self.ops_log_block("task after remove", &self.snapshot_task());
@@ -1125,10 +1249,18 @@ impl ServiceManager for TaskSchedulerManager {
 
     fn status(&self) -> ServiceStatus {
         dlog!("taskscheduler", "status() called");
+        let process_running = Self::is_cokacdir_running();
         match self.query_task_state() {
-            Ok(None) => ServiceStatus::NotInstalled,
+            Ok(None) => {
+                if process_running {
+                    ServiceStatus::Unknown(
+                        "cokacdir process is running without a registered scheduled task".into(),
+                    )
+                } else {
+                    ServiceStatus::NotInstalled
+                }
+            }
             Ok(Some(state)) => {
-                let process_running = Self::is_cokacdir_running();
                 match state.as_str() {
                     "Running" => {
                         if process_running {
@@ -1162,7 +1294,83 @@ impl ServiceManager for TaskSchedulerManager {
     }
 
     fn log_path(&self) -> Option<PathBuf> {
-        dlog!("taskscheduler", "log_path: {}", self.paths.log_file.display());
+        dlog!(
+            "taskscheduler",
+            "log_path: {}",
+            self.paths.log_file.display()
+        );
         Some(self.paths.log_file.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_paths() -> ServicePaths {
+        ServicePaths {
+            service_file: PathBuf::from(""),
+            wrapper_script: PathBuf::from(r"C:\Users\A&B\.cokacdir\scripts\run.bat"),
+            state_file: PathBuf::from(r"C:\Users\A&B\.cokacdir\windows-service.json"),
+            log_dir: PathBuf::from(r"C:\Users\A&B%\.cokacdir\logs"),
+            log_file: PathBuf::from(r"C:\Users\A&B%\.cokacdir\logs\cokacdir.log"),
+            error_log_file: PathBuf::from(r"C:\Users\A&B%\.cokacdir\logs\cokacdir.error.log"),
+        }
+    }
+
+    #[test]
+    fn bat_args_escape_cmd_metacharacters() {
+        assert_eq!(
+            TaskSchedulerManager::escape_bat_arg("a&b|c<d>e^f%g\"h"),
+            "\"a^&b^|c^<d^>e^^f%%g^\"h\""
+        );
+    }
+
+    #[test]
+    fn wrapper_escapes_redirection_paths() {
+        let paths = fake_paths();
+        let wrapper = TaskSchedulerManager::generate_wrapper(
+            Path::new(r"C:\Program Files\cokacdir\cokacdir.exe"),
+            &["123:abc&%".to_string()],
+            &paths,
+        );
+
+        assert!(wrapper.contains(r#""123:abc^&%%""#));
+        assert!(wrapper.contains(r#">> "C:\Users\A^&B%%\.cokacdir\logs\cokacdir.log""#));
+        assert!(wrapper.contains(r#"2>> "C:\Users\A^&B%%\.cokacdir\logs\cokacdir.error.log""#));
+    }
+
+    #[test]
+    fn redacted_wrapper_preview_does_not_include_tokens() {
+        let paths = fake_paths();
+        let binary = Path::new(r"C:\Users\alice\cokacdir.exe");
+        let real =
+            TaskSchedulerManager::generate_wrapper(binary, &["123456:SECRET".to_string()], &paths);
+        let preview = TaskSchedulerManager::redacted_wrapper_preview(binary, 1, &paths);
+
+        assert!(real.contains("SECRET"));
+        assert!(!preview.contains("SECRET"));
+        assert!(preview.contains("[redacted-token]"));
+    }
+
+    #[test]
+    fn registration_script_uses_current_identity_limited_fallback_and_service_settings() {
+        let script = TaskSchedulerManager::generate_registration_script(
+            Path::new(r"C:\Users\O'Hara\.cokacdir\scripts\run.bat"),
+            Path::new(r"C:\Users\O'Hara"),
+        );
+
+        assert!(script.contains("[System.Security.Principal.WindowsIdentity]::GetCurrent().Name"));
+        assert!(script.contains(
+            "New-Object System.Security.Principal.WindowsPrincipal -ArgumentList $identity"
+        ));
+        assert!(script.contains("$runLevel = if ($isAdmin) { 'Highest' } else { 'Limited' }"));
+        assert!(script.contains("-RunLevel $runLevel"));
+        assert!(script.contains("New-ScheduledTaskSettingsSet"));
+        assert!(script.contains("-AllowStartIfOnBatteries"));
+        assert!(script.contains("-DontStopIfGoingOnBatteries"));
+        assert!(script.contains("-ExecutionTimeLimit ([TimeSpan]::Zero)"));
+        assert!(script.contains(r"C:\Users\O''Hara\.cokacdir\scripts\run.bat"));
+        assert!(script.contains(r"C:\Users\O''Hara"));
     }
 }

@@ -1,8 +1,9 @@
-use crate::core::config::Config;
+use crate::core::config::{Config, TokenBotInfo};
 use crate::core::platform;
 use crate::core::version;
 use crate::core::ProgressMsg;
 use crate::service::{self, ServiceStatus};
+use std::collections::BTreeSet;
 use std::sync::mpsc;
 
 /// Result of an asynchronous service-status query.
@@ -13,6 +14,11 @@ use std::sync::mpsc;
 pub struct StatusUpdate {
     pub service_status: ServiceStatus,
     pub running_token_count: Option<usize>,
+}
+
+pub struct TokenInfoUpdate {
+    pub token: String,
+    pub result: Result<TokenBotInfo, String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,6 +71,9 @@ pub struct App {
     /// Sends "please refresh now" pings to the background status thread.
     /// Send errors (channel closed) are ignored — the thread exits when App drops.
     pub status_refresh_tx: Option<mpsc::Sender<()>>,
+    pub token_info_update_tx: mpsc::Sender<TokenInfoUpdate>,
+    pub token_info_update_rx: Option<mpsc::Receiver<TokenInfoUpdate>>,
+    pub token_info_fetching: BTreeSet<String>,
     // Binary path input state
     pub binary_path_input: String,
     // Progress view state
@@ -97,6 +106,7 @@ impl App {
         dlog!("app", "Spawning background status thread...");
         let (status_update_tx, status_update_rx) = mpsc::channel::<StatusUpdate>();
         let (status_refresh_tx, status_refresh_rx) = mpsc::channel::<()>();
+        let (token_info_update_tx, token_info_update_rx) = mpsc::channel::<TokenInfoUpdate>();
         std::thread::spawn(move || {
             dlog!("app::status_thread", "started");
             loop {
@@ -128,9 +138,7 @@ impl App {
                 // periodic tick. Drain any extra pending triggers so a burst
                 // of requests only causes one extra poll.
                 match status_refresh_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-                    Ok(()) => {
-                        while status_refresh_rx.try_recv().is_ok() {}
-                    }
+                    Ok(()) => while status_refresh_rx.try_recv().is_ok() {},
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
                         dlog!("app::status_thread", "trigger tx dropped, exiting");
@@ -180,6 +188,9 @@ impl App {
             service_action_rx: None,
             status_update_rx: Some(status_update_rx),
             status_refresh_tx: Some(status_refresh_tx),
+            token_info_update_tx,
+            token_info_update_rx: Some(token_info_update_rx),
+            token_info_fetching: BTreeSet::new(),
             binary_path_input: String::new(),
         }
     }
@@ -197,10 +208,13 @@ impl App {
             let _ = tx.send(());
         }
         self.config = Config::load();
-        dlog!("app", "Config loaded: total={} active={} disabled={}",
+        dlog!(
+            "app",
+            "Config loaded: total={} active={} disabled={}",
             self.config.tokens.len(),
             self.config.active_tokens().len(),
-            self.config.disabled_tokens.len());
+            self.config.disabled_tokens.len()
+        );
     }
 
     /// Drain pending status updates from the background thread.
@@ -251,7 +265,12 @@ impl App {
             .as_ref()
             .and_then(|p| version::installed_version(p));
         self.cokacdir_path = cokacdir_path.map(|p| p.to_string_lossy().to_string());
-        dlog!("app", "cokacdir version: {:?}, path: {:?}", self.cokacdir_version, self.cokacdir_path);
+        dlog!(
+            "app",
+            "cokacdir version: {:?}, path: {:?}",
+            self.cokacdir_version,
+            self.cokacdir_path
+        );
         self.refresh_status();
     }
 
@@ -282,8 +301,9 @@ impl App {
     }
 
     pub fn token_count(&self) -> usize {
-        if self.service_status == ServiceStatus::Running {
-            self.running_token_count.unwrap_or(self.config.active_tokens().len())
+        if self.service_status.is_running() {
+            self.running_token_count
+                .unwrap_or(self.config.active_tokens().len())
         } else {
             self.config.active_tokens().len()
         }
@@ -306,13 +326,124 @@ impl App {
 
     pub fn enter_token_input(&mut self) {
         dlog!("app", "enter_token_input()");
+        self.config = Config::load();
         self.token_input.clear();
         self.token_list = self.config.tokens.clone();
-        self.token_disabled = self.config.tokens.iter()
+        self.token_disabled = self
+            .config
+            .tokens
+            .iter()
             .map(|t| self.config.disabled_tokens.contains(t))
             .collect();
         self.token_cursor = None;
         self.view = View::TokenInput;
+        self.fetch_missing_token_info();
+    }
+
+    pub fn fetch_missing_token_info(&mut self) {
+        let missing: Vec<String> = self
+            .token_list
+            .iter()
+            .filter(|token| {
+                !self.config.token_bot_info.contains_key(*token)
+                    && !self.token_info_fetching.contains(*token)
+            })
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+
+        for token in &missing {
+            self.token_info_fetching.insert(token.clone());
+        }
+        self.set_status("Fetching Telegram bot info...", false);
+        dlog!(
+            "app::token_info",
+            "fetching {} missing token metadata item(s)",
+            missing.len()
+        );
+
+        let tx = self.token_info_update_tx.clone();
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    for token in missing {
+                        let _ = tx.send(TokenInfoUpdate {
+                            token,
+                            result: Err(format!("Cannot start Telegram lookup runtime: {}", e)),
+                        });
+                    }
+                    return;
+                }
+            };
+
+            for token in missing {
+                let result = match rt.block_on(crate::core::telegram::fetch_bot_info(&token)) {
+                    Ok(info) => {
+                        let save_result = save_token_info_if_still_registered(&token, &info);
+                        match save_result {
+                            Ok(()) => Ok(info),
+                            Err(e) => Err(e),
+                        }
+                    }
+                    Err(e) => Err(e),
+                };
+                let _ = tx.send(TokenInfoUpdate { token, result });
+            }
+        });
+    }
+
+    pub fn poll_token_info_update(&mut self) -> bool {
+        let mut updates = Vec::new();
+        let mut disconnected = false;
+        if let Some(rx) = self.token_info_update_rx.as_ref() {
+            loop {
+                match rx.try_recv() {
+                    Ok(update) => updates.push(update),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if disconnected {
+            dlog!("app::token_info", "token info update channel disconnected");
+            self.token_info_update_rx = None;
+        }
+        if updates.is_empty() {
+            return false;
+        }
+
+        let mut success_count = 0usize;
+        let mut error_count = 0usize;
+        for update in updates {
+            self.token_info_fetching.remove(&update.token);
+            match update.result {
+                Ok(info) => {
+                    if self.token_list.iter().any(|t| t == &update.token)
+                        || self.config.tokens.iter().any(|t| t == &update.token)
+                    {
+                        self.config.token_bot_info.insert(update.token, info);
+                    }
+                    success_count += 1;
+                }
+                Err(e) => {
+                    dlog!("app::token_info", "Telegram info fetch failed: {}", e);
+                    error_count += 1;
+                }
+            }
+        }
+
+        if success_count > 0 {
+            self.set_status("Telegram bot info updated", false);
+        } else if error_count > 0 {
+            self.set_status("Could not fetch Telegram bot info", true);
+        }
+        true
     }
 
     pub fn start_progress(&mut self, action: ProgressAction) {
@@ -409,4 +540,19 @@ impl App {
             }
         }
     }
+}
+
+fn save_token_info_if_still_registered(token: &str, info: &TokenBotInfo) -> Result<(), String> {
+    let mut config = Config::load();
+    if !config.tokens.iter().any(|t| t == token) {
+        dlog!(
+            "app::token_info",
+            "skip saving metadata for token no longer registered"
+        );
+        return Ok(());
+    }
+    config
+        .token_bot_info
+        .insert(token.to_string(), info.clone());
+    config.save()
 }

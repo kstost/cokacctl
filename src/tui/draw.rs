@@ -25,7 +25,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
-            f.buffer_mut().get_mut(x, y).reset();
+            if let Some(cell) = f.buffer_mut().cell_mut((x, y)) {
+                cell.reset();
+            }
         }
     }
     match app.view {
@@ -63,7 +65,10 @@ fn draw_version_panel(f: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(SUBTLE))
-        .title(Span::styled(" cokacctl ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            " cokacctl ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
         .padding(Padding::horizontal(1));
 
     let inner = block.inner(area);
@@ -75,7 +80,11 @@ fn draw_version_panel(f: &mut Frame, app: &App, area: Rect) {
     let (ver_style, status_icon, version_str) = if let Some(ver) = app.cokacdir_version.as_deref() {
         (Style::default().fg(GREEN), "  ", format!("v{}", ver))
     } else if app.cokacdir_path.is_some() {
-        (Style::default().fg(YELLOW), "  ", "unknown version".to_string())
+        (
+            Style::default().fg(YELLOW),
+            "  ",
+            "unknown version".to_string(),
+        )
     } else {
         (Style::default().fg(RED), "  ", "not installed".to_string())
     };
@@ -91,7 +100,10 @@ fn draw_version_panel(f: &mut Frame, app: &App, area: Rect) {
     // cokacctl version
     lines.push(Line::from(vec![
         Span::styled("cokacctl ", Style::default().fg(LABEL)),
-        Span::styled(format!("  v{}", env!("CARGO_PKG_VERSION")), Style::default().fg(DIM)),
+        Span::styled(
+            format!("  v{}", env!("CARGO_PKG_VERSION")),
+            Style::default().fg(DIM),
+        ),
     ]));
 
     // Update status
@@ -104,8 +116,17 @@ fn draw_version_panel(f: &mut Frame, app: &App, area: Rect) {
         let latest = app.latest_version.as_deref().unwrap_or("?");
         lines.push(Line::from(vec![
             Span::styled("update   ", Style::default().fg(LABEL)),
-            Span::styled(format!("  v{} available ", latest), Style::default().fg(YELLOW)),
-            Span::styled(" U ", Style::default().fg(Color::Black).bg(CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("  v{} available ", latest),
+                Style::default().fg(YELLOW),
+            ),
+            Span::styled(
+                " U ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
     } else {
         lines.push(Line::from(vec![
@@ -128,6 +149,30 @@ fn draw_service_panel(f: &mut Frame, app: &App, area: Rect) {
         match &app.service_status {
             ServiceStatus::Running => (GREEN, "● Running".to_string()),
             ServiceStatus::Stopped => (RED, "○ Stopped".to_string()),
+            ServiceStatus::DirectRunning(reason) => {
+                let suffix = reason
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("");
+                if suffix.is_empty() {
+                    (GREEN, "● Running direct".to_string())
+                } else {
+                    (GREEN, format!("● Running direct: {}", suffix))
+                }
+            }
+            ServiceStatus::DirectStopped(reason) => {
+                let suffix = reason
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("");
+                if suffix.is_empty() {
+                    (RED, "○ Stopped direct".to_string())
+                } else {
+                    (RED, format!("○ Stopped direct: {}", suffix))
+                }
+            }
             ServiceStatus::NotInstalled => (DIM, "○ Not installed".to_string()),
             ServiceStatus::Unknown(reason) => {
                 // Take only the first non-empty line so multi-line stderr
@@ -147,10 +192,11 @@ fn draw_service_panel(f: &mut Frame, app: &App, area: Rect) {
         }
     };
 
-    let os_name = match crate::core::platform::Os::detect() {
-        crate::core::platform::Os::MacOS => "launchd",
-        crate::core::platform::Os::Linux => "systemd",
-        crate::core::platform::Os::Windows => "Task Scheduler",
+    let os_name = match (&app.service_status, crate::core::platform::Os::detect()) {
+        (ServiceStatus::DirectRunning(_) | ServiceStatus::DirectStopped(_), _) => "direct",
+        (_, crate::core::platform::Os::MacOS) => "launchd",
+        (_, crate::core::platform::Os::Linux) => "systemd",
+        (_, crate::core::platform::Os::Windows) => "Task Scheduler",
     };
 
     // Key hints - dimmed when busy
@@ -160,7 +206,9 @@ fn draw_service_panel(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(DIM)
     };
     let key_style = if app.service_busy {
-        Style::default().fg(Color::Indexed(239)).bg(Color::Indexed(236))
+        Style::default()
+            .fg(Color::Indexed(239))
+            .bg(Color::Indexed(236))
     } else {
         Style::default().fg(Color::Black).bg(ACCENT)
     };
@@ -182,8 +230,15 @@ fn draw_service_panel(f: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(SUBTLE))
-        .title(Span::styled(" Service ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)))
-        .title(Title::from(hints).alignment(Alignment::Center).position(ratatui::widgets::block::Position::Bottom))
+        .title(Span::styled(
+            " Service ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
+        .title(
+            Title::from(hints)
+                .alignment(Alignment::Center)
+                .position(ratatui::widgets::block::Position::Bottom),
+        )
         .padding(Padding::horizontal(1));
 
     let inner = block.inner(area);
@@ -237,7 +292,7 @@ fn draw_log_panel(f: &mut Frame, app: &App, area: Rect) {
     } else {
         let visible = inner.height as usize;
         let total = app.log_lines.len();
-        let start = if total > visible { total - visible } else { 0 };
+        let start = total.saturating_sub(visible);
         let lines: Vec<Line> = app.log_lines[start..]
             .iter()
             .map(|l| Line::from(Span::styled(l.clone(), Style::default().fg(DIM))))
@@ -289,7 +344,10 @@ fn draw_progress(f: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(SUBTLE))
-        .title(Span::styled(title, Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            title,
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
         .padding(Padding::new(1, 1, 1, 0));
 
     let inner = block.inner(area);
@@ -300,9 +358,12 @@ fn draw_progress(f: &mut Frame, app: &App) {
     // Progress lines
     let visible = (inner.height as usize).saturating_sub(4);
     let total = app.progress_lines.len();
-    let start = if total > visible { total - visible } else { 0 };
+    let start = total.saturating_sub(visible);
     for line in &app.progress_lines[start..] {
-        lines.push(Line::from(Span::styled(line.clone(), Style::default().fg(TEXT))));
+        lines.push(Line::from(Span::styled(
+            line.clone(),
+            Style::default().fg(TEXT),
+        )));
     }
 
     // Completion status
@@ -312,7 +373,10 @@ fn draw_progress(f: &mut Frame, app: &App) {
             Ok(()) => {
                 lines.push(Line::from(vec![
                     Span::styled(" ", Style::default().fg(GREEN)),
-                    Span::styled(" Done", Style::default().fg(GREEN).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        " Done",
+                        Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
+                    ),
                 ]));
             }
             Err(e) => {
@@ -372,10 +436,13 @@ fn draw_welcome(f: &mut Frame, _app: &App) {
         lines.push(Line::from(""));
     }
 
-    lines.push(Line::from(Span::styled(
+    lines.push(
+        Line::from(Span::styled(
         format!("v{}", env!("CARGO_PKG_VERSION")),
         Style::default().fg(DIM),
-    )).alignment(Alignment::Center));
+        ))
+        .alignment(Alignment::Center),
+    );
     lines.push(Line::from(""));
     lines.push(
         Line::from(Span::styled(
@@ -388,7 +455,13 @@ fn draw_welcome(f: &mut Frame, _app: &App) {
     lines.push(
         Line::from(vec![
             Span::styled("Press ", Style::default().fg(TEXT)),
-            Span::styled(" I ", Style::default().fg(Color::Black).bg(CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " I ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" to install", Style::default().fg(TEXT)),
         ])
         .alignment(Alignment::Center),
@@ -442,13 +515,20 @@ fn draw_token_input(f: &mut Frame, app: &App) {
     f.render_widget(guide_block, chunks[0]);
     let guide = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled("Telegram Bot Token", Style::default().fg(TEXT).add_modifier(Modifier::BOLD)),
-            Span::styled(" - cokacdir runs as a Telegram bot.", Style::default().fg(DIM)),
+            Span::styled(
+                "Telegram Bot Token",
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " - cokacdir runs as a Telegram bot.",
+                Style::default().fg(DIM),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Get a token from ", Style::default().fg(DIM)),
             Span::styled("@BotFather", Style::default().fg(CYAN)),
-            Span::styled(" on Telegram (/newbot).", Style::default().fg(DIM)),
+            Span::styled(" on Telegram. Optional: ", Style::default().fg(DIM)),
+            Span::styled("TOKEN | display name", Style::default().fg(CYAN)),
         ]),
     ]);
     f.render_widget(guide, guide_inner);
@@ -472,15 +552,25 @@ fn draw_token_input(f: &mut Frame, app: &App) {
         for (i, token) in app.token_list.iter().enumerate() {
             let is_selected = app.token_cursor == Some(i);
             let is_disabled = app.token_disabled.get(i).copied().unwrap_or(false);
-            let display = mask_token(token);
-            let (dot, dot_color) = if is_disabled { ("○", SUBTLE) } else { ("●", GREEN) };
+            let display = token_summary(app, token, i);
+            let (dot, dot_color) = if is_disabled {
+                ("○", SUBTLE)
+            } else {
+                ("●", GREEN)
+            };
             if is_selected {
                 let toggle_label = if is_disabled { " on " } else { " off " };
                 token_lines.push(Line::from(vec![
-                    Span::styled(" > ", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        " > ",
+                        Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(dot, Style::default().fg(dot_color)),
                     Span::styled(format!(" {}. ", i + 1), Style::default().fg(CYAN)),
-                    Span::styled(display.clone(), Style::default().fg(if is_disabled { DIM } else { TEXT })),
+                    Span::styled(
+                        display.clone(),
+                        Style::default().fg(if is_disabled { DIM } else { TEXT }),
+                    ),
                     Span::styled("  ", Style::default()),
                     Span::styled(" Space ", Style::default().fg(Color::Black).bg(CYAN)),
                     Span::styled(toggle_label, Style::default().fg(DIM)),
@@ -492,7 +582,10 @@ fn draw_token_input(f: &mut Frame, app: &App) {
                     Span::styled("   ", Style::default()),
                     Span::styled(dot, Style::default().fg(dot_color)),
                     Span::styled(format!(" {}. ", i + 1), Style::default().fg(DIM)),
-                    Span::styled(display.clone(), Style::default().fg(if is_disabled { SUBTLE } else { DIM })),
+                    Span::styled(
+                        display.clone(),
+                        Style::default().fg(if is_disabled { SUBTLE } else { DIM }),
+                    ),
                 ]));
             }
         }
@@ -502,7 +595,10 @@ fn draw_token_input(f: &mut Frame, app: &App) {
     // ── Input panel ──
     let mut hint_spans = vec![];
     if input_focused {
-        hint_spans.push(Span::styled(" Enter ", Style::default().fg(Color::Black).bg(ACCENT)));
+        hint_spans.push(Span::styled(
+            " Enter ",
+            Style::default().fg(Color::Black).bg(ACCENT),
+        ));
         hint_spans.push(Span::styled(" Add ", Style::default().fg(DIM)));
     }
     hint_spans.push(Span::styled(" Esc ", Style::default().fg(DIM).bg(SUBTLE)));
@@ -512,8 +608,15 @@ fn draw_token_input(f: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(if input_focused { CYAN } else { SUBTLE }))
-        .title(Span::styled(" Add Token ", Style::default().fg(ACCENT)))
-        .title(Title::from(Line::from(hint_spans)).alignment(Alignment::Right).position(ratatui::widgets::block::Position::Bottom))
+        .title(Span::styled(
+            " Add Token or TOKEN | Name ",
+            Style::default().fg(ACCENT),
+        ))
+        .title(
+            Title::from(Line::from(hint_spans))
+                .alignment(Alignment::Right)
+                .position(ratatui::widgets::block::Position::Bottom),
+        )
         .padding(Padding::horizontal(1));
     let input_inner = input_block.inner(chunks[2]);
     f.render_widget(input_block, chunks[2]);
@@ -560,8 +663,8 @@ fn draw_binary_path_input(f: &mut Frame, app: &App) {
 
     // ── Guide panel ──
     let current_path = app.cokacdir_path.as_deref();
-    let path_valid = !app.binary_path_input.is_empty()
-        && std::path::Path::new(&app.binary_path_input).is_file();
+    let path_valid =
+        !app.binary_path_input.is_empty() && std::path::Path::new(&app.binary_path_input).is_file();
     let path_empty = app.binary_path_input.is_empty();
 
     let guide_block = Block::default()
@@ -579,12 +682,16 @@ fn draw_binary_path_input(f: &mut Frame, app: &App) {
     let mut guide_lines = vec![
         Line::from(vec![
             Span::styled("Set a custom path for the ", Style::default().fg(DIM)),
-            Span::styled("cokacdir", Style::default().fg(TEXT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "cokacdir",
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" binary.", Style::default().fg(DIM)),
         ]),
-        Line::from(vec![
-            Span::styled("Leave empty to use auto-detection.", Style::default().fg(DIM)),
-        ]),
+        Line::from(vec![Span::styled(
+            "Leave empty to use auto-detection.",
+            Style::default().fg(DIM),
+        )]),
     ];
 
     if let Some(path) = current_path {
@@ -616,7 +723,10 @@ fn draw_binary_path_input(f: &mut Frame, app: &App) {
         hint_spans.push(Span::styled(validity_hint, Style::default().fg(color)));
         hint_spans.push(Span::styled("  ", Style::default()));
     }
-    hint_spans.push(Span::styled(" Enter ", Style::default().fg(Color::Black).bg(ACCENT)));
+    hint_spans.push(Span::styled(
+        " Enter ",
+        Style::default().fg(Color::Black).bg(ACCENT),
+    ));
     hint_spans.push(Span::styled(" Save ", Style::default().fg(DIM)));
     hint_spans.push(Span::styled(" Esc ", Style::default().fg(DIM).bg(SUBTLE)));
     hint_spans.push(Span::styled(" Cancel ", Style::default().fg(DIM)));
@@ -667,6 +777,57 @@ fn mask_token(token: &str) -> String {
     format!("{}{}{}", prefix, masked, suffix)
 }
 
+fn token_summary(app: &App, token: &str, idx: usize) -> String {
+    let bot_info = app.config.token_bot_info.get(token);
+    let telegram_name = bot_info.and_then(|info| info.first_name.clone());
+    let name = app
+        .config
+        .token_names
+        .get(token)
+        .cloned()
+        .or(telegram_name)
+        .unwrap_or_else(|| derive_bot_name(token, idx));
+    let handle = bot_info
+        .and_then(|info| info.username.as_ref())
+        .filter(|username| !username.trim().is_empty())
+        .map(|username| format!("@{}", username))
+        .unwrap_or_else(|| derive_bot_handle(token));
+
+    let mut parts = vec![name, handle];
+    if let Some(desc) = bot_info.and_then(|info| {
+        info.short_description
+            .as_ref()
+            .or(info.description.as_ref())
+    }) {
+        if !desc.trim().is_empty() {
+            parts.push(desc.trim().to_string());
+        }
+    }
+    parts.push(mask_token(token));
+    parts.join(" · ")
+}
+
+fn derive_bot_name(token: &str, idx: usize) -> String {
+    if let Some((id, _)) = token.split_once(':') {
+        format!("Bot {}", id)
+    } else {
+        format!("Bot {}", idx + 1)
+    }
+}
+
+fn derive_bot_handle(token: &str) -> String {
+    let chars: Vec<char> = token.chars().collect();
+    let tail: String = chars
+        .iter()
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("@bot_{}", tail)
+}
+
 // ── Log Fullscreen ─────────────────────────────────────────────
 
 fn draw_log_fullscreen(f: &mut Frame, app: &App) {
@@ -694,8 +855,15 @@ fn draw_log_fullscreen(f: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(SUBTLE))
-        .title(Span::styled(title, Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)))
-        .title(Title::from(hints).alignment(Alignment::Center).position(ratatui::widgets::block::Position::Bottom));
+        .title(Span::styled(
+            title,
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
+        .title(
+            Title::from(hints)
+                .alignment(Alignment::Center)
+                .position(ratatui::widgets::block::Position::Bottom),
+        );
 
     let inner = block.inner(area);
     f.render_widget(block, area);
