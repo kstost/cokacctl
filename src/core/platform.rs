@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Os {
@@ -348,21 +348,124 @@ fn count_quoted_args(s: &str) -> usize {
 pub fn shell_config_path() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
     let shell = std::env::var("SHELL").unwrap_or_default();
-    let path = if shell.ends_with("zsh") {
-        Some(home.join(".zshrc"))
-    } else if shell.ends_with("bash") {
-        let bashrc = home.join(".bashrc");
-        let profile = home.join(".bash_profile");
-        if bashrc.exists() {
-            Some(bashrc)
-        } else if profile.exists() {
-            Some(profile)
+    let path = shell_config_path_for(&home, &shell);
+    dlog!("platform", "Shell config path: {:?}", path);
+    path
+}
+
+fn shell_config_path_for(home: &Path, shell: &str) -> Option<PathBuf> {
+    let shell_name = Path::new(shell)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(shell);
+
+    if shell_name.ends_with("zsh") {
+        return Some(home.join(".zshrc"));
+    }
+
+    if shell_name.ends_with("bash") {
+        return Some(bash_shell_config_path(home));
+    }
+
+    fallback_shell_config_path(home, shell)
+}
+
+fn bash_shell_config_path(home: &Path) -> PathBuf {
+    let bashrc = home.join(".bashrc");
+    let profile = home.join(".bash_profile");
+    if bashrc.exists() {
+        bashrc
+    } else if profile.exists() {
+        profile
+    } else {
+        bashrc
+    }
+}
+
+fn fallback_shell_config_path(home: &Path, shell: &str) -> Option<PathBuf> {
+    for name in [".zshrc", ".bashrc", ".bash_profile"] {
+        let path = home.join(name);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    if shell.trim().is_empty() {
+        if cfg!(target_os = "macos") {
+            Some(home.join(".zshrc"))
         } else {
-            Some(bashrc)
+            Some(home.join(".bashrc"))
         }
     } else {
         None
-    };
-    dlog!("platform", "Shell config path: {:?}", path);
-    path
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_home(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "cokacctl-platform-test-{}-{}",
+            name,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn shell_config_path_uses_zshrc_for_zsh() {
+        let home = temp_home("zsh");
+
+        assert_eq!(
+            shell_config_path_for(&home, "/bin/zsh"),
+            Some(home.join(".zshrc"))
+        );
+
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn shell_config_path_prefers_bashrc_for_bash() {
+        let home = temp_home("bash");
+        std::fs::write(home.join(".bashrc"), "").unwrap();
+        std::fs::write(home.join(".bash_profile"), "").unwrap();
+
+        assert_eq!(
+            shell_config_path_for(&home, "/bin/bash"),
+            Some(home.join(".bashrc"))
+        );
+
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn shell_config_path_falls_back_to_existing_common_rc_when_shell_unknown() {
+        let home = temp_home("unknown");
+        std::fs::write(home.join(".zshrc"), "").unwrap();
+
+        assert_eq!(
+            shell_config_path_for(&home, "/usr/bin/fish"),
+            Some(home.join(".zshrc"))
+        );
+
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn shell_config_path_uses_default_when_shell_is_empty() {
+        let home = temp_home("empty");
+        let expected = if cfg!(target_os = "macos") {
+            home.join(".zshrc")
+        } else {
+            home.join(".bashrc")
+        };
+
+        assert_eq!(shell_config_path_for(&home, ""), Some(expected));
+
+        let _ = std::fs::remove_dir_all(home);
+    }
 }

@@ -508,6 +508,10 @@ fn setup_shell_wrapper_inner(
                 "install",
                 "setup_shell_wrapper: no shell config path detected, skip"
             );
+            send(
+                tx,
+                "  Could not determine a zsh/bash config file; shell wrapper was not added.".into(),
+            );
             return;
         }
     };

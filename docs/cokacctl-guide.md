@@ -51,7 +51,7 @@ macOS와 Linux에서는 `cokacctl install`이 `cokacdir` 바이너리를 설치�
 
 - `zsh`: `~/.zshrc`
 - `bash`: `~/.bashrc`가 있으면 `~/.bashrc`, 없고 `~/.bash_profile`이 있으면 `~/.bash_profile`, 둘 다 없으면 `~/.bashrc`
-- 그 외 shell: 자동 추가하지 않음
+- `$SHELL`이 비어 있거나 지원하지 않는 shell이면 기존 `~/.zshrc`, `~/.bashrc`, `~/.bash_profile`을 순서대로 찾고, `$SHELL`이 비어 있으며 기존 파일도 없으면 OS 기본값으로 새 파일을 만듭니다.
 
 wrapper는 `COKACDIR_LASTDIR_FILE`을 사용합니다. 그래서 사용자가 대화형 `cokacdir` 실행을 정상 종료했을 때만 현재 shell의 디렉토리를 마지막 위치로 이동시키고, `cokacdir --version` 같은 비대화형 명령은 디렉토리를 바꾸지 않습니다.
 
