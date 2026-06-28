@@ -38,10 +38,8 @@ cokacctl install
 
 - `/usr/local/bin/cokacdir`에 바이너리를 다운로드합니다.
 - 권한이 없으면 자동으로 `sudo`를 사용합니다. `sudo`도 실패하면 `~/.local/bin/cokacdir`에 설치합니다.
-- `~/.zshrc`에 shell wrapper 함수를 자동 추가합니다:
-  ```bash
-  cokacdir() { command cokacdir "$@" && cd "$(cat ~/.cokacdir/lastdir 2>/dev/null || pwd)"; }
-  ```
+- `~/.zshrc`에 `COKACDIR_LASTDIR_FILE` 기반 shell wrapper 함수를 자동 추가합니다.
+- wrapper 본문은 `https://cokacdir.cokac.com/install.sh`의 `COKACDIR SHELL WRAPPER` 블록을 기준으로 가져옵니다.
 
 ### 2. 토큰 등록
 

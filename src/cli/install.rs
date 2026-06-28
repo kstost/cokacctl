@@ -1,9 +1,15 @@
 use crate::core::{download, platform, ProgressMsg, ProgressTx};
 
-const SHELL_FUNC: &str = r#"cokacdir() { command cokacdir "$@" && cd "$(cat ~/.cokacdir/lastdir 2>/dev/null || pwd)"; }"#;
-
+const COKACDIR_INSTALL_SH_URL: &str = "https://cokacdir.cokac.com/install.sh";
 const PATH_MARKER: &str = "# cokacdir PATH (added by installer)";
 const PATH_BLOCK: &str = "\n# cokacdir PATH (added by installer)\ncase \":$PATH:\" in\n    *\":$HOME/.local/bin:\"*) ;;\n    *) export PATH=\"$HOME/.local/bin:$PATH\" ;;\nesac\n";
+const SHELL_WRAPPER_BEGIN: &str = "# BEGIN COKACDIR SHELL WRAPPER";
+const SHELL_WRAPPER_END: &str = "# END COKACDIR SHELL WRAPPER";
+const CURRENT_WRAPPER_MARKER: &str =
+    r#"COKACDIR_LASTDIR_FILE="$cokacdir_lastdir_file" command cokacdir "$@""#;
+const SHELL_WRAPPER_HEADER: &str = "# cokacdir - cd to last directory on interactive exit";
+const LEGACY_LASTDIR_WRAPPER_MARKER: &str = r#"cat ~/.cokacdir/lastdir"#;
+const LEGACY_INTERACTIVE_WRAPPER_MARKER: &str = "local cokacdir_should_cd=1";
 
 fn send(tx: &Option<ProgressTx>, msg: String) {
     if let Some(tx) = tx {
@@ -36,7 +42,7 @@ fn try_restart_existing(tx: &Option<ProgressTx>) {
             "  Install failed — restarting service with existing binary...".into(),
         );
         match crate::service::manager().start(&existing, &tokens) {
-            Ok(_)  => dlog!("install", "Rollback: service restart ok"),
+            Ok(_) => dlog!("install", "Rollback: service restart ok"),
             Err(e) => dlog!("install", "Rollback: service restart failed: {}", e),
         }
     } else {
@@ -70,6 +76,11 @@ async fn run_inner(tx: &Option<ProgressTx>) -> Result<(), String> {
     let arch = platform::Arch::detect();
     let url = platform::binary_download_url(os, arch);
     let install_path = platform::default_install_path(os);
+    let shell_wrapper = if os != platform::Os::Windows {
+        Some(fetch_canonical_shell_wrapper(tx).await?)
+    } else {
+        None
+    };
 
     dlog!("install", "OS: {:?}, Arch: {:?}", os, arch);
     dlog!("install", "URL: {}", url);
@@ -105,7 +116,16 @@ async fn run_inner(tx: &Option<ProgressTx>) -> Result<(), String> {
                 dlog!("install", "Default path not writable, trying sudo");
                 send(tx, "  /usr/local/bin requires elevated privileges.".into());
                 send(tx, "  Trying sudo...".into());
-                return install_with_sudo(&url, &install_path, was_running, tx).await;
+                return install_with_sudo(
+                    &url,
+                    &install_path,
+                    was_running,
+                    tx,
+                    shell_wrapper
+                        .as_deref()
+                        .expect("Unix install should have a shell wrapper"),
+                )
+                .await;
             }
         }
         install_path.clone()
@@ -124,7 +144,13 @@ async fn run_inner(tx: &Option<ProgressTx>) -> Result<(), String> {
     // Setup shell wrapper on Unix
     if os != platform::Os::Windows {
         dlog!("install", "Setting up shell wrapper...");
-        setup_shell_wrapper_inner(tx, &dest);
+        setup_shell_wrapper_inner(
+            tx,
+            &dest,
+            shell_wrapper
+                .as_deref()
+                .expect("Unix install should have a shell wrapper"),
+        );
     }
 
     send(tx, format!("  cokacdir installed at {}", dest.display()));
@@ -149,6 +175,7 @@ async fn install_with_sudo(
     dest: &std::path::Path,
     was_running: bool,
     tx: &Option<ProgressTx>,
+    shell_wrapper: &str,
 ) -> Result<(), String> {
     dlog!("install", "install_with_sudo()");
     let tmp = std::env::temp_dir().join(format!("cokacdir_dl_{}", std::process::id()));
@@ -228,7 +255,7 @@ async fn install_with_sudo(
         dest.to_path_buf()
     };
 
-    setup_shell_wrapper_inner(tx, &actual_path);
+    setup_shell_wrapper_inner(tx, &actual_path, shell_wrapper);
 
     if was_running {
         let config = crate::core::config::Config::load();
@@ -271,7 +298,206 @@ fn is_writable(path: &std::path::Path) -> bool {
     }
 }
 
-fn setup_shell_wrapper_inner(tx: &Option<ProgressTx>, install_path: &std::path::Path) {
+fn canonical_install_sh_url() -> String {
+    std::env::var("COKACCTL_INSTALL_SH_URL").unwrap_or_else(|_| COKACDIR_INSTALL_SH_URL.to_string())
+}
+
+async fn fetch_canonical_shell_wrapper(tx: &Option<ProgressTx>) -> Result<String, String> {
+    let url = canonical_install_sh_url();
+    send(tx, format!("  Fetching shell wrapper from {}", url));
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch shell wrapper from {}: {}", url, e))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "Failed to fetch shell wrapper from {}: HTTP {}",
+            url,
+            response.status()
+        ));
+    }
+
+    let script = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read shell wrapper from {}: {}", url, e))?;
+
+    extract_canonical_shell_wrapper(&script)
+        .ok_or_else(|| format!("No valid cokacdir shell wrapper block found in {}", url))
+}
+
+fn extract_canonical_shell_wrapper(script: &str) -> Option<String> {
+    let begin = script.find(SHELL_WRAPPER_BEGIN)?;
+    let after_begin = &script[begin..];
+    let end = after_begin.find(SHELL_WRAPPER_END)? + SHELL_WRAPPER_END.len();
+    let block = &after_begin[..end];
+
+    if !block.contains("cokacdir()") || !block.contains(CURRENT_WRAPPER_MARKER) {
+        return None;
+    }
+
+    let mut wrapper = block.trim_matches(|c| c == '\n' || c == '\r').to_string();
+    wrapper.push('\n');
+    Some(wrapper)
+}
+
+struct ShellWrapperUpdate {
+    content: String,
+    changed: bool,
+    wrapper_written: bool,
+    custom_function_present: bool,
+}
+
+fn update_shell_wrapper_content(existing: &str, shell_wrapper: &str) -> ShellWrapperUpdate {
+    let (mut content, custom_function_present) = strip_managed_cokacdir_wrappers(existing);
+
+    let wrapper_written = !custom_function_present;
+    if wrapper_written {
+        append_current_shell_wrapper(&mut content, shell_wrapper);
+    }
+
+    ShellWrapperUpdate {
+        changed: content != existing,
+        content,
+        wrapper_written,
+        custom_function_present,
+    }
+}
+
+fn strip_managed_cokacdir_wrappers(existing: &str) -> (String, bool) {
+    let lines: Vec<&str> = existing.split_inclusive('\n').collect();
+    let mut output = String::new();
+    let mut custom_function_present = false;
+    let mut i = 0;
+
+    while i < lines.len() {
+        if lines[i].trim() == SHELL_WRAPPER_BEGIN {
+            let (block, end) = collect_marked_wrapper_block(&lines, i);
+            if is_managed_cokacdir_wrapper(&block) {
+                i = end;
+                continue;
+            }
+            if block.contains("cokacdir()") {
+                custom_function_present = true;
+            }
+            output.push_str(&block);
+            i = end;
+            continue;
+        }
+
+        if is_shell_wrapper_header(lines[i]) {
+            if let Some(next) = next_non_empty_line(&lines, i + 1) {
+                if is_cokacdir_function_start(lines[next]) {
+                    let (block, end) = collect_function_block(&lines, next);
+                    if is_managed_cokacdir_wrapper(&block) {
+                        i = end;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if is_cokacdir_function_start(lines[i]) {
+            let (block, end) = collect_function_block(&lines, i);
+            if is_managed_cokacdir_wrapper(&block) {
+                i = end;
+                continue;
+            }
+            custom_function_present = true;
+            output.push_str(&block);
+            i = end;
+            continue;
+        }
+
+        output.push_str(lines[i]);
+        i += 1;
+    }
+
+    (output, custom_function_present)
+}
+
+fn append_current_shell_wrapper(content: &mut String, shell_wrapper: &str) {
+    while content.ends_with("\n\n") {
+        content.pop();
+    }
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    if !content.is_empty() {
+        content.push('\n');
+    }
+    content.push_str(shell_wrapper.trim_end());
+    content.push('\n');
+}
+
+fn next_non_empty_line(lines: &[&str], start: usize) -> Option<usize> {
+    (start..lines.len()).find(|&idx| !lines[idx].trim().is_empty())
+}
+
+fn is_shell_wrapper_header(line: &str) -> bool {
+    line.trim() == SHELL_WRAPPER_HEADER
+        || line.trim() == "# cokacdir - cd to last directory on exit"
+}
+
+fn is_cokacdir_function_start(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("cokacdir()") && trimmed.contains('{')
+}
+
+fn collect_function_block(lines: &[&str], start: usize) -> (String, usize) {
+    let mut block = String::new();
+    let mut depth = 0isize;
+    let mut idx = start;
+
+    while idx < lines.len() {
+        let line = lines[idx];
+        depth += line.matches('{').count() as isize;
+        depth -= line.matches('}').count() as isize;
+        block.push_str(line);
+        idx += 1;
+        if depth <= 0 {
+            break;
+        }
+    }
+
+    (block, idx)
+}
+
+fn collect_marked_wrapper_block(lines: &[&str], start: usize) -> (String, usize) {
+    let mut block = String::new();
+    let mut idx = start;
+
+    while idx < lines.len() {
+        let line = lines[idx];
+        block.push_str(line);
+        idx += 1;
+        if line.trim() == SHELL_WRAPPER_END {
+            break;
+        }
+    }
+
+    (block, idx)
+}
+
+fn is_managed_cokacdir_wrapper(block: &str) -> bool {
+    block.contains(CURRENT_WRAPPER_MARKER)
+        || block.contains(LEGACY_LASTDIR_WRAPPER_MARKER)
+        || block.contains(LEGACY_INTERACTIVE_WRAPPER_MARKER)
+}
+
+fn setup_shell_wrapper_inner(
+    tx: &Option<ProgressTx>,
+    install_path: &std::path::Path,
+    shell_wrapper: &str,
+) {
     let config_path = match platform::shell_config_path() {
         Some(p) => {
             dlog!("install", "setup_shell_wrapper: config={}", p.display());
@@ -292,7 +518,7 @@ fn setup_shell_wrapper_inner(tx: &Option<ProgressTx>, install_path: &std::path::
         String::new()
     };
 
-    let needs_wrapper = !existing.contains("cokacdir()");
+    let wrapper_update = update_shell_wrapper_content(&existing, shell_wrapper);
 
     // Only add the PATH block when we installed under the fallback directory
     // (~/.local/bin). For /usr/local/bin installs the directory is already in
@@ -306,7 +532,7 @@ fn setup_shell_wrapper_inner(tx: &Option<ProgressTx>, install_path: &std::path::
     };
     let needs_path = installed_in_fallback_dir && !existing.contains(PATH_MARKER);
 
-    if !needs_wrapper && !needs_path {
+    if !wrapper_update.changed && !needs_path {
         dlog!(
             "install",
             "Shell config already up to date: {}",
@@ -315,19 +541,14 @@ fn setup_shell_wrapper_inner(tx: &Option<ProgressTx>, install_path: &std::path::
         return;
     }
 
-    let mut content = existing;
-    if needs_wrapper {
-        content.push_str("\n# cokacdir - cd to last directory on exit\n");
-        content.push_str(SHELL_FUNC);
-        content.push('\n');
-    }
+    let mut content = wrapper_update.content;
     if needs_path {
         content.push_str(PATH_BLOCK);
     }
 
     match std::fs::write(&config_path, &content) {
         Ok(_) => {
-            if needs_wrapper {
+            if wrapper_update.wrapper_written && wrapper_update.changed {
                 dlog!(
                     "install",
                     "Shell wrapper added to {}",
@@ -336,6 +557,21 @@ fn setup_shell_wrapper_inner(tx: &Option<ProgressTx>, install_path: &std::path::
                 send(
                     tx,
                     format!("  Shell wrapper added to {}", config_path.display()),
+                );
+                if !needs_path {
+                    send(
+                        tx,
+                        format!(
+                            "  Open a new terminal (or run: source {}) to enable the cokacdir shell function.",
+                            config_path.display()
+                        ),
+                    );
+                }
+            }
+            if wrapper_update.custom_function_present {
+                send(
+                    tx,
+                    "  Existing custom cokacdir shell function found; left it unchanged.".into(),
                 );
             }
             if needs_path {
@@ -361,5 +597,141 @@ fn setup_shell_wrapper_inner(tx: &Option<ProgressTx>, install_path: &std::path::
                 e
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shell_wrapper_fixture() -> &'static str {
+        r#"# BEGIN COKACDIR SHELL WRAPPER
+# cokacdir - cd to last directory on interactive exit
+cokacdir() {
+    local cokacdir_lastdir_file
+    COKACDIR_LASTDIR_FILE="$cokacdir_lastdir_file" command cokacdir "$@"
+}
+# END COKACDIR SHELL WRAPPER
+"#
+    }
+
+    fn count_cokacdir_functions(content: &str) -> usize {
+        content.matches("cokacdir()").count()
+    }
+
+    #[test]
+    fn shell_wrapper_extracted_from_install_script() {
+        let script = format!(
+            r#"write_shell_wrapper() {{
+    cat <<'COKACDIR_SHELL_WRAPPER'
+{}COKACDIR_SHELL_WRAPPER
+}}"#,
+            shell_wrapper_fixture()
+        );
+
+        assert_eq!(
+            extract_canonical_shell_wrapper(&script).as_deref(),
+            Some(shell_wrapper_fixture())
+        );
+    }
+
+    #[test]
+    fn shell_wrapper_extract_rejects_missing_markers() {
+        assert!(
+            extract_canonical_shell_wrapper("cokacdir() { command cokacdir \"$@\"; }").is_none()
+        );
+    }
+
+    #[test]
+    fn shell_wrapper_extract_rejects_missing_current_marker() {
+        let script = r#"# BEGIN COKACDIR SHELL WRAPPER
+cokacdir() {
+    command cokacdir "$@"
+}
+# END COKACDIR SHELL WRAPPER
+"#;
+
+        assert!(extract_canonical_shell_wrapper(script).is_none());
+    }
+
+    #[test]
+    fn shell_wrapper_added_when_missing() {
+        let update = update_shell_wrapper_content("", shell_wrapper_fixture());
+
+        assert!(update.changed);
+        assert!(update.wrapper_written);
+        assert_eq!(count_cokacdir_functions(&update.content), 1);
+        assert!(update.content.contains(CURRENT_WRAPPER_MARKER));
+    }
+
+    #[test]
+    fn shell_wrapper_current_wrapper_stays_single() {
+        let existing = shell_wrapper_fixture().to_string();
+        let update = update_shell_wrapper_content(&existing, shell_wrapper_fixture());
+
+        assert_eq!(count_cokacdir_functions(&update.content), 1);
+        assert!(update.content.contains(CURRENT_WRAPPER_MARKER));
+    }
+
+    #[test]
+    fn shell_wrapper_env_var_comment_does_not_count_as_current_wrapper() {
+        let update = update_shell_wrapper_content(
+            "# COKACDIR_LASTDIR_FILE=example\n",
+            shell_wrapper_fixture(),
+        );
+
+        assert!(update.changed);
+        assert!(update.wrapper_written);
+        assert_eq!(count_cokacdir_functions(&update.content), 1);
+        assert!(update.content.contains(CURRENT_WRAPPER_MARKER));
+    }
+
+    #[test]
+    fn shell_wrapper_replaces_legacy_lastdir_wrapper() {
+        let legacy = r#"cokacdir() { command cokacdir "$@" && cd "$(cat ~/.cokacdir/lastdir 2>/dev/null || pwd)"; }"#;
+        let update = update_shell_wrapper_content(legacy, shell_wrapper_fixture());
+
+        assert_eq!(count_cokacdir_functions(&update.content), 1);
+        assert!(update.content.contains(CURRENT_WRAPPER_MARKER));
+        assert!(!update.content.contains(LEGACY_LASTDIR_WRAPPER_MARKER));
+    }
+
+    #[test]
+    fn shell_wrapper_replaces_legacy_interactive_wrapper() {
+        let legacy = r#"cokacdir() {
+    local cokacdir_should_cd=1
+    command cokacdir "$@"
+}"#;
+        let update = update_shell_wrapper_content(legacy, shell_wrapper_fixture());
+
+        assert_eq!(count_cokacdir_functions(&update.content), 1);
+        assert!(update.content.contains(CURRENT_WRAPPER_MARKER));
+        assert!(!update.content.contains(LEGACY_INTERACTIVE_WRAPPER_MARKER));
+    }
+
+    #[test]
+    fn shell_wrapper_leaves_unknown_custom_wrapper_unchanged() {
+        let custom = r#"cokacdir() {
+    echo "custom"
+    command cokacdir "$@"
+}"#;
+        let update = update_shell_wrapper_content(custom, shell_wrapper_fixture());
+
+        assert!(!update.changed);
+        assert!(!update.wrapper_written);
+        assert!(update.custom_function_present);
+        assert_eq!(update.content, custom);
+    }
+
+    #[test]
+    fn shell_wrapper_deduplicates_current_and_legacy_wrappers() {
+        let legacy = r#"cokacdir() { command cokacdir "$@" && cd "$(cat ~/.cokacdir/lastdir 2>/dev/null || pwd)"; }
+"#;
+        let existing = format!("{}\n{}", shell_wrapper_fixture(), legacy);
+        let update = update_shell_wrapper_content(&existing, shell_wrapper_fixture());
+
+        assert_eq!(count_cokacdir_functions(&update.content), 1);
+        assert!(update.content.contains(CURRENT_WRAPPER_MARKER));
+        assert!(!update.content.contains(LEGACY_LASTDIR_WRAPPER_MARKER));
     }
 }
