@@ -23,6 +23,46 @@ cokacctl log                     로그 실시간 확인 (tail -f)
 
 ---
 
+## 처음 설치 흐름
+
+일반 사용자는 아래 명령으로 `cokacctl`을 설치하고 TUI 대시보드를 실행합니다.
+
+```bash
+curl -fsSL https://cokacdir.cokac.com/manage.sh | bash && cokacctl
+```
+
+TUI가 열리면 `I` 키를 눌러 `cokacdir`을 설치합니다. 이 동작은 CLI에서 `cokacctl install`을 실행하는 것과 같은 설치 경로를 사용합니다.
+
+CLI만 사용할 경우에는 아래 순서로 진행할 수 있습니다.
+
+```bash
+cokacctl install
+cokacctl token YOUR_BOT_TOKEN
+cokacctl start
+```
+
+---
+
+## Unix shell wrapper 설정
+
+macOS와 Linux에서는 `cokacctl install`이 `cokacdir` 바이너리를 설치한 뒤, 현재 사용자의 shell 설정 파일에 `cokacdir()` wrapper를 추가합니다.
+
+대상 파일은 `$SHELL` 기준으로 결정됩니다.
+
+- `zsh`: `~/.zshrc`
+- `bash`: `~/.bashrc`가 있으면 `~/.bashrc`, 없고 `~/.bash_profile`이 있으면 `~/.bash_profile`, 둘 다 없으면 `~/.bashrc`
+- 그 외 shell: 자동 추가하지 않음
+
+wrapper는 `COKACDIR_LASTDIR_FILE`을 사용합니다. 그래서 사용자가 대화형 `cokacdir` 실행을 정상 종료했을 때만 현재 shell의 디렉토리를 마지막 위치로 이동시키고, `cokacdir --version` 같은 비대화형 명령은 디렉토리를 바꾸지 않습니다.
+
+기존 installer가 추가한 오래된 wrapper는 새 wrapper로 교체됩니다. 사용자가 직접 만든 custom `cokacdir()` 함수가 있으면 덮어쓰지 않습니다.
+
+wrapper 본문의 원본은 `https://cokacdir.cokac.com/install.sh` 안의 `COKACDIR SHELL WRAPPER` 블록입니다. 새 wrapper를 배포할 때는 `cokacdir`의 `install.sh`를 먼저 공개한 뒤, 그 블록을 가져오는 `cokacctl`을 배포해야 합니다.
+
+`~/.local/bin/cokacdir`로 fallback 설치된 경우에는 같은 shell 설정 파일에 `~/.local/bin` PATH 블록도 추가합니다.
+
+---
+
 ## macOS
 
 ### 필수 환경
@@ -38,8 +78,7 @@ cokacctl install
 
 - `/usr/local/bin/cokacdir`에 바이너리를 다운로드합니다.
 - 권한이 없으면 자동으로 `sudo`를 사용합니다. `sudo`도 실패하면 `~/.local/bin/cokacdir`에 설치합니다.
-- `~/.zshrc`에 `COKACDIR_LASTDIR_FILE` 기반 shell wrapper 함수를 자동 추가합니다.
-- wrapper 본문은 `https://cokacdir.cokac.com/install.sh`의 `COKACDIR SHELL WRAPPER` 블록을 기준으로 가져옵니다.
+- shell wrapper 설정은 위의 Unix 공통 정책을 따릅니다.
 
 ### 2. 토큰 등록
 
@@ -114,7 +153,7 @@ cokacctl install
 
 - `/usr/local/bin/cokacdir`에 설치합니다.
 - 권한 없으면 `sudo` → 실패 시 `~/.local/bin/cokacdir` 순으로 시도합니다.
-- `~/.bashrc`(또는 `~/.bash_profile`)에 shell wrapper 함수를 추가합니다.
+- shell wrapper 설정은 위의 Unix 공통 정책을 따릅니다.
 
 ### 2. 토큰 등록
 
@@ -273,18 +312,18 @@ cokacctl
 ```
 Q           종료
 L           로그 전체화면 (Esc 또는 L로 복귀)
-S           서비스 시작 (사전에 CLI로 토큰 등록 필요)
+S           서비스 시작 (활성 토큰 필요)
 T           서비스 중지
 R           서비스 재시작
 D           서비스 삭제
 K           토큰 관리
-U           업데이트 안내
-I           설치 안내
+U           업데이트 실행
+I           설치 실행
 P           바이너리 경로 설정
 Ctrl+C      강제 종료
 ```
 
-> TUI에서 서비스를 시작하려면 먼저 `cokacctl token <TOKEN>`으로 토큰을 등록해야 합니다.
+> TUI에서 서비스를 시작하려면 먼저 `K` 키 또는 `cokacctl token <TOKEN>`으로 토큰을 등록해야 합니다.
 > 이후에는 TUI에서 `S` 키로 시작/`T` 키로 중지할 수 있습니다.
 
 ### 자동 갱신
@@ -305,7 +344,7 @@ cokacctl status
 
 ```
   Platform:  linux/x86_64
-  cokacctl:  v0.1.0
+  cokacctl:  v1.0.36
   cokacdir:  v0.4.67 (/usr/local/bin/cokacdir)
   Service:   ● Running  (systemd)
   Tokens:    2 bot(s)
@@ -333,6 +372,19 @@ cokacctl status
 ---
 
 ## 전체 워크플로우 (처음부터 끝까지)
+
+일반 사용자 설치:
+
+```bash
+# 1. cokacctl 설치 및 TUI 실행
+curl -fsSL https://cokacdir.cokac.com/manage.sh | bash && cokacctl
+
+# 2. TUI에서 I 키로 cokacdir 설치
+# 3. TUI에서 K 키로 토큰 등록
+# 4. TUI에서 S 키로 서비스 시작
+```
+
+CLI로 진행할 때:
 
 ```bash
 # 1. cokacdir 설치
