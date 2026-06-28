@@ -12,6 +12,7 @@ use std::sync::mpsc;
 /// Keeping this off the main thread avoids blocking the UI for the 1–3 s that
 /// `Get-ScheduledTask` / `tasklist` take to spawn on Windows.
 pub struct StatusUpdate {
+    pub queried_at: std::time::Instant,
     pub service_status: ServiceStatus,
     pub running_token_count: Option<usize>,
 }
@@ -66,6 +67,7 @@ pub struct App {
     pub service_busy_label: String,
     pub service_busy_tick: usize,
     pub service_action_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    pub last_service_action_completed_at: Option<std::time::Instant>,
     /// Receives `StatusUpdate`s produced by the background status thread.
     pub status_update_rx: Option<mpsc::Receiver<StatusUpdate>>,
     /// Sends "please refresh now" pings to the background status thread.
@@ -126,6 +128,7 @@ impl App {
                 );
                 if status_update_tx
                     .send(StatusUpdate {
+                        queried_at: t0,
                         service_status,
                         running_token_count,
                     })
@@ -186,6 +189,7 @@ impl App {
             service_busy_label: String::new(),
             service_busy_tick: 0,
             service_action_rx: None,
+            last_service_action_completed_at: None,
             status_update_rx: Some(status_update_rx),
             status_refresh_tx: Some(status_refresh_tx),
             token_info_update_tx,
@@ -231,6 +235,17 @@ impl App {
             loop {
                 match rx.try_recv() {
                     Ok(update) => {
+                        if self
+                            .last_service_action_completed_at
+                            .is_some_and(|completed_at| update.queried_at < completed_at)
+                        {
+                            dlog!(
+                                "app",
+                                "discarding stale status update from before completed service action: status={:?}",
+                                update.service_status
+                            );
+                            continue;
+                        }
                         self.service_status = update.service_status;
                         self.running_token_count = update.running_token_count;
                         applied = true;
@@ -516,6 +531,8 @@ impl App {
             Ok(Ok(())) => {
                 dlog!("app", "Service action succeeded");
                 self.service_action_rx = None;
+                self.apply_successful_service_action_status_hint();
+                self.last_service_action_completed_at = Some(std::time::Instant::now());
                 self.service_busy = false;
                 self.set_status("Service operation completed", false);
                 self.refresh_status();
@@ -538,6 +555,46 @@ impl App {
                 self.service_action_rx = None;
                 self.service_busy = false;
             }
+        }
+    }
+
+    fn apply_successful_service_action_status_hint(&mut self) {
+        // The authoritative status still comes from the background status
+        // thread, but that update arrives asynchronously after a service action
+        // completes. If we drop `service_busy` while keeping the old status, the
+        // dashboard can briefly redraw stale text such as "Stopped direct"
+        // between "Starting..." and the refreshed "Running direct".
+        let hinted_status = match self.service_busy_label.as_str() {
+            "Starting" | "Restarting" => match &self.service_status {
+                ServiceStatus::DirectRunning(reason) | ServiceStatus::DirectStopped(reason) => {
+                    ServiceStatus::DirectRunning(reason.clone())
+                }
+                _ => ServiceStatus::Running,
+            },
+            "Stopping" => match &self.service_status {
+                ServiceStatus::DirectRunning(reason) | ServiceStatus::DirectStopped(reason) => {
+                    ServiceStatus::DirectStopped(reason.clone())
+                }
+                _ => ServiceStatus::Stopped,
+            },
+            "Removing" => match &self.service_status {
+                ServiceStatus::DirectRunning(reason) | ServiceStatus::DirectStopped(reason) => {
+                    ServiceStatus::DirectStopped(reason.clone())
+                }
+                _ => ServiceStatus::NotInstalled,
+            },
+            _ => return,
+        };
+
+        if self.service_status != hinted_status {
+            dlog!(
+                "app",
+                "optimistic service status hint after {}: {:?} -> {:?}",
+                self.service_busy_label,
+                self.service_status,
+                hinted_status
+            );
+            self.service_status = hinted_status;
         }
     }
 }
